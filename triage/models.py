@@ -50,6 +50,7 @@ class AdvisoryMatch:
     fixed_version: str | None
     source: str             # where the advisory came from, e.g. "osv.dev"
     retrieved_at: str       # ISO-8601 UTC timestamp of the fetch
+    queried_ecosystem: str = "PyPI"   # which OSV lookup returned it (other values = TC2 name-collision check)
 
 
 @dataclass
@@ -68,6 +69,7 @@ class ScanResult:
     dependencies: list[Dependency]
     matches: list[AdvisoryMatch]
     plans: list[UpgradePlan]
+    warnings: list[str] = field(default_factory=list)   # e.g. a cross-ecosystem lookup that failed
 
     def to_dict(self) -> dict:
         return asdict(self)

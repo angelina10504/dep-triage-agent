@@ -7,11 +7,13 @@ from packaging.version import Version
 
 from .matcher import match_advisory
 from .models import AdvisoryMatch, Decision, PlanStatus, ScanResult, UpgradePlan
-from .osv import fetch_advisories
+from .osv import AdvisorySourceError, fetch_advisories
 from .parser import parse_requirements
 
 Fetcher = Callable[[str, str], tuple[list[dict], str]]
 _MAX_BUMPS = 10
+# Same name, different package: looked up only to show (and exclude) name collisions - TC2.
+OTHER_ECOSYSTEMS = ("npm", "Maven", "Go", "RubyGems", "crates.io")
 
 
 def count_vulnerabilities(matches: list[AdvisoryMatch]) -> int:
@@ -75,13 +77,41 @@ def _plan(dep, matches: list[AdvisoryMatch], advisories: list[dict], retrieved_a
                        reason="could not find a version that clears every advisory", advisory_ids=ids)
 
 
-def scan(requirements_text: str, fetch: Fetcher = fetch_advisories) -> ScanResult:
+def _source_unavailable(dep, err: AdvisorySourceError) -> UpgradePlan:
+    return UpgradePlan(dependency_id=dep.id, package=dep.raw_name, current_version=dep.version,
+                       target_version=None, status=PlanStatus.UNCERTAIN,
+                       reason=f"advisory source unavailable: {err.error_type}")
+
+
+def scan(requirements_text: str, fetch: Fetcher = fetch_advisories,
+         other_ecosystems: tuple[str, ...] = OTHER_ECOSYSTEMS) -> ScanResult:
     deps = parse_requirements(requirements_text)
     all_matches: list[AdvisoryMatch] = []
     plans: list[UpgradePlan] = []
+    warnings: list[str] = []
     for dep in deps:
-        advisories, retrieved_at = fetch(dep.name, dep.ecosystem)
+        try:
+            advisories, retrieved_at = fetch(dep.name, dep.ecosystem)
+        except AdvisorySourceError as e:
+            # No data is not "no advisories": never plan an upgrade or call it safe.
+            plans.append(_source_unavailable(dep, e))
+            continue
         matches = [match_advisory(dep, adv, retrieved_at) for adv in advisories]
-        all_matches.extend(matches)
         plans.append(_plan(dep, matches, advisories, retrieved_at))
-    return ScanResult(dependencies=deps, matches=all_matches, plans=plans)
+
+        seen = {a.get("id") for a in advisories}
+        for eco in other_ecosystems:
+            try:
+                others, other_at = fetch(dep.name, eco)
+            except AdvisorySourceError as e:
+                warnings.append(f"{dep.id}: {eco} name-collision lookup failed ({e.error_type})")
+                continue
+            for adv in others:
+                if adv.get("id") in seen:
+                    continue
+                seen.add(adv.get("id"))
+                m = match_advisory(dep, adv, other_at)
+                m.queried_ecosystem = eco
+                matches.append(m)
+        all_matches.extend(matches)
+    return ScanResult(dependencies=deps, matches=all_matches, plans=plans, warnings=warnings)

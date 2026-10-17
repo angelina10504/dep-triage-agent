@@ -30,6 +30,10 @@ def _open_prs(args, result) -> int:
     from .github_pr import GitHubClient, ask_approval, build_proposal, open_pr
     from .store import ActionStore
 
+    upgrades = [p for p in result.plans if p.status == PlanStatus.UPGRADE]
+    if not upgrades:            # uncertain / no_action plans never become PRs
+        print("\nNo upgrade plans - no PRs proposed.")
+        return 0
     _load_dotenv()
     token = os.environ.get("GITHUB_TOKEN")
     if not token:
@@ -40,9 +44,7 @@ def _open_prs(args, result) -> int:
     base = args.base or client.default_branch(args.repo)
     deps = {d.id: d for d in result.dependencies}
 
-    for plan in result.plans:
-        if plan.status != PlanStatus.UPGRADE:
-            continue
+    for plan in upgrades:
         p = build_proposal(plan, deps[plan.dependency_id], result.matches, args.repo, base, args.path)
         done = store.get(p.dependency_id, p.target_version)
         if done and done.pr_url:
@@ -119,13 +121,38 @@ def main(argv: list[str] | None = None) -> int:
     for p in result.plans:
         print(f"{p.package:<14}{p.current_version or '-':<10}{p.target_version or '-':<10}"
               f"{p.status.value:<11}{p.reason}")
-    print("\nPer-advisory decisions:")
+    print("\nPer-advisory decisions (PyPI):")
     for m in result.matches:
-        print(f"  [{m.decision.value:<12}] {m.dependency_id:<28} {m.advisory_id:<22} {m.reason}")
+        if m.queried_ecosystem == "PyPI":
+            print(f"  [{m.decision.value:<12}] {m.dependency_id:<28} {m.advisory_id:<22} {m.reason}")
+    collisions = [m for m in result.matches if m.queried_ecosystem != "PyPI"]
+    print("\nSame name in other ecosystems (TC2 - not this package, never upgraded):")
+    for m in collisions:
+        print(f"  {m.dependency_id:<28} {m.advisory_id:<22} {m.decision.value}: {m.reason}")
+    if not collisions:
+        print("  none found")
+    for w in result.warnings:
+        print(f"  warning: {w}")
     if args.open_prs:
         return _open_prs(args, result)
     return 0
 
 
+def cli() -> int:
+    """Entry point: expected failures become one line on stderr, not a traceback."""
+    import requests
+
+    from .github_pr import GitHubError, StaleProposal
+    from .osv import AdvisorySourceError
+    try:
+        return main()
+    except (OSError, AdvisorySourceError, GitHubError, StaleProposal, requests.RequestException) as e:
+        print(f"error: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        return 130
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(cli())

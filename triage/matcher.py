@@ -75,8 +75,8 @@ def match_advisory(dep: Dependency, adv: dict, retrieved_at: str) -> AdvisoryMat
         })
         return result(
             Decision.EXCLUDED,
-            f"advisory affects {', '.join(others) or 'no listed package'}; "
-            f"dependency is {dep.ecosystem}/{dep.name} - different package",
+            f"advisory is for {', '.join(others) or 'no listed package'}, "
+            f"dependency is {dep.ecosystem}/{dep.name}",
         )
 
     # Rule 2: we need an exact installed version to compare.

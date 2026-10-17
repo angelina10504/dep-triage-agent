@@ -110,7 +110,7 @@ def test_invalid_installed_version_is_uncertain():
 # ---------- upgrade plan ----------
 
 def _fetcher(db):
-    return lambda name, eco: (db.get(name, []), T)
+    return lambda name, eco: (db.get(name, []) if eco == "PyPI" else [], T)
 
 
 def test_plan_picks_highest_fix_across_advisories():

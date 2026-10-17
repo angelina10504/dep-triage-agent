@@ -85,7 +85,7 @@ def fake_fetch(name, ecosystem):
                           "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "3.1.6"}]}]}],
         }],
     }
-    return advisories.get(name, []), T
+    return (advisories.get(name, []) if ecosystem == "PyPI" else []), T
 
 
 @pytest.fixture
