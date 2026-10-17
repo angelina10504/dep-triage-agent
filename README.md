@@ -21,6 +21,8 @@ pip install -r requirements.txt
 pytest -q                                    # offline unit tests
 python -m triage path/to/requirements.txt    # live scan against osv.dev
 python -m triage path/to/requirements.txt --json   # full evidence
+# propose upgrade PRs; each one asks y/N, approvals are stored in triage.db
+python -m triage path/to/requirements.txt --repo owner/name --open-prs
 ```
 
 ## Decision rules (no LLM)
