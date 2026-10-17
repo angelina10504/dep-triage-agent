@@ -10,6 +10,8 @@ Results are cached in SQLite by a hash of (provider, model, prompt version, inpu
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hashlib
 import json
 import os
@@ -29,6 +31,25 @@ NO_CLAIMS = ("Never use the words 'fixed', 'deployed', 'resolved' or 'safe now'.
              "clears an advisory, write: the target version is outside these advisories' affected ranges.")
 BACKOFF = (1, 2, 4)
 MAX_RETRY_AFTER = 30          # never sleep longer than this on one Retry-After
+
+
+_deadline: contextvars.ContextVar[float | None] = contextvars.ContextVar("llm_deadline", default=None)
+
+
+@contextlib.contextmanager
+def llm_budget(seconds: float | None):
+    """Cap the total LLM time inside the block (e.g. one graph node). Past the cap, calls fail
+    fast with "time budget exceeded" and callers fall back to their deterministic result."""
+    token = _deadline.set(time.monotonic() + seconds if seconds else None)
+    try:
+        yield
+    finally:
+        _deadline.reset(token)
+
+
+def _remaining() -> float | None:
+    d = _deadline.get()
+    return None if d is None else d - time.monotonic()
 
 
 class LLMError(RuntimeError):
@@ -55,7 +76,7 @@ class OpenAICompatibleProvider:
 
     def __init__(self, name: str, base_url: str, api_key: str, model: str,
                  session: requests.Session | None = None, sleep: Callable[[float], None] = time.sleep,
-                 timeout: int = 60, extra: dict | None = None):
+                 timeout: int = 30, extra: dict | None = None):
         self.name, self.base_url, self.model = name, base_url.rstrip("/"), model
         self.extra = extra or {}            # provider/model-specific request fields
         self.s = session or requests.Session()
@@ -65,8 +86,12 @@ class OpenAICompatibleProvider:
     def _post(self, payload: dict) -> dict:
         reason = "unknown"
         for attempt in range(len(BACKOFF) + 1):
+            left = _remaining()
+            if left is not None and left < 2:
+                raise LLMError("time budget exceeded" + (f" (after {reason})" if attempt else ""))
             try:
-                r = self.s.post(f"{self.base_url}/chat/completions", json=payload, timeout=self.timeout)
+                r = self.s.post(f"{self.base_url}/chat/completions", json=payload,
+                                timeout=self.timeout if left is None else max(1.0, min(self.timeout, left)))
             except (requests.Timeout, requests.ConnectionError) as e:
                 reason = type(e).__name__
             else:
@@ -83,11 +108,17 @@ class OpenAICompatibleProvider:
                         wait = float(r.headers.get("retry-after", ""))
                     except ValueError:
                         wait = BACKOFF[attempt]
-                    self.sleep(min(max(wait, BACKOFF[attempt]), MAX_RETRY_AFTER))
+                    self._sleep(min(max(wait, BACKOFF[attempt]), MAX_RETRY_AFTER), reason)
                     continue
             if attempt < len(BACKOFF):
-                self.sleep(BACKOFF[attempt])
+                self._sleep(BACKOFF[attempt], reason)
         raise LLMError(reason)
+
+    def _sleep(self, seconds: float, reason: str) -> None:
+        left = _remaining()
+        if left is not None and seconds >= left:
+            raise LLMError(f"time budget exceeded (after {reason})")
+        self.sleep(seconds)
 
     def complete_json(self, system: str, user: str, schema: dict, schema_name: str) -> dict:
         data = self._post({

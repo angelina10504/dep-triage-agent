@@ -1,34 +1,44 @@
-"""Offline tests for assess_upgrade_risk: citations must come from fetched notes."""
+"""Offline tests for assess_upgrade_risk: level computed in code from repo usage, never by the LLM."""
 import pytest
 
 from triage.llm import LLMCache, LLMError
 from triage.release_notes import NoteItem, ReleaseNotes
-from triage.risk import assess_upgrade_risk
+from triage.repo_context import RepoContext
+from triage.risk import assess_upgrade_risk, deprecation_removals, grounded, render_risk
 
-U1 = "https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L278"
-U2 = "https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L397-L398"
+U_REMOVE = "https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L278"
+U_URLS = "https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L397-L398"
+U_PY = "https://github.com/pallets/werkzeug/releases/tag/3.1.0"
+U_DEFAULT = "https://github.com/pallets/werkzeug/releases/tag/3.1.1"
 NOTES = ReleaseNotes("pallets/werkzeug", [
-    NoteItem("3.0.0", "Remove previously deprecated code. :pr:`2768`", U1, "changelog"),
-    NoteItem("2.3.0", "Deprecate the ``werkzeug.urls`` module.", U2, "changelog")])
+    NoteItem("2.3.0", "Deprecate the ``werkzeug.urls`` module. Use ``urllib.parse`` instead.", U_URLS, "changelog"),
+    NoteItem("3.0.0", "Remove previously deprecated code. :pr:`2768`", U_REMOVE, "changelog"),
+    NoteItem("3.1.0", "Drop support for Python 3.8.", U_PY, "github_release"),
+    NoteItem("3.1.1", "max_form_memory_size defaults to 500kB.", U_DEFAULT, "github_release")])
+APP = "import os\nfrom werkzeug.urls import url_quote\n\n\ndef q(p):\n    return url_quote(p)\n"
 
 
 class FakeLLM:
     name, model = "fake", "m"
 
-    def __init__(self, *answers):
-        self.answers, self.calls = list(answers), []
+    def __init__(self, changes=None, symbols=None, reasons="Removals matter most."):
+        self.changes, self.symbols, self.reasons, self.calls = changes, symbols, reasons, []
 
     def complete_json(self, system, user, schema, schema_name):
-        self.calls.append((system, user))
-        a = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
-        if isinstance(a, Exception):
-            raise a
-        return a
+        self.calls.append(schema_name)
+        if schema_name == "upgrade_breaking_changes":
+            if isinstance(self.changes, Exception):
+                raise self.changes
+            r = self.reasons.pop(0) if isinstance(self.reasons, list) else self.reasons
+            return {"breaking_changes": [{"change": c, "source_url": u} for c, u in (self.changes or [])], "reasons": r}
+        if isinstance(self.symbols, Exception):
+            raise self.symbols
+        return {"apis": self.symbols or []}
 
 
-def answer(*changes, risk="high", reasons="Major version with removals."):
-    return {"breaking_risk": risk, "reasons": reasons,
-            "breaking_changes": [{"change": c, "source_url": u} for c, u in changes]}
+def repo(files=None, python=("3.12",)):
+    return RepoContext("acme/demo", "main", list(python), ".github/workflows/ci.yml",
+                       {"app.py": APP} if files is None else files)
 
 
 @pytest.fixture
@@ -36,97 +46,118 @@ def cache(tmp_path):
     return LLMCache(str(tmp_path / "t.db"))
 
 
-def run(llm, cache, notes=NOTES):
-    return assess_upgrade_risk("Werkzeug", "2.2.2", "3.1.9", notes, cache, llm)
+def run(cache, llm, notes=NOTES, ctx="default"):
+    return assess_upgrade_risk("Werkzeug", "2.2.2", "3.1.9", notes, cache, llm,
+                               repo=repo() if ctx == "default" else ctx, import_name="werkzeug")
 
 
-def test_cited_changes_kept_uncited_dropped(cache):
-    llm = FakeLLM(answer(("3.0 removed the deprecated werkzeug.urls functions such as url_quote", U1),
-                         ("Invented change", "https://example.com/made-up")))
-    r = run(llm, cache)
-    assert r["breaking_risk"] == "high" and r["dropped_uncited"] == 1
-    assert [c["source_url"] for c in r["breaking_changes"]] == [U1, U2]    # + deterministic pair
-    assert r["breaking_changes"][1]["from"] == "release_notes"
+LLM_CHANGES = [("Removed the werkzeug.urls module that was deprecated in 2.3.0.", U_REMOVE),
+               ("Dropped support for Python 3.8.", U_PY),
+               ("max_form_memory_size now defaults to 500kB.", U_DEFAULT)]
+SYMS = [{"index": 0, "symbols": ["werkzeug.urls"]}]
 
 
-def test_prompt_contains_only_fetched_items(cache):
-    llm = FakeLLM(answer(("x", U1)))
-    run(llm, cache)
-    user = llm.calls[0][1]
-    assert U1 in user and U2 in user and '"major_version_change": true' in user
+# ---------- level computed in code ----------
+
+def test_high_when_repo_uses_a_removed_api_with_file_line_evidence(cache):
+    r = run(cache, FakeLLM(LLM_CHANGES, SYMS))
+    assert r["breaking_risk"] == "high"
+    assert r["risk_reason"] == "repo uses werkzeug.urls.url_quote at app.py:2, app.py:6 -> likely to break"
+    assert [(u["path"], u["line"]) for u in r["usages"]] == [("app.py", 2), ("app.py", 6)]
 
 
-def test_high_risk_without_any_valid_citation_is_retried_then_unavailable(cache):
-    llm = FakeLLM(answer(("Invented", "https://example.com/x")))
-    r = run(llm, cache)
-    assert len(llm.calls) == 2
-    assert r["breaking_risk"] == "unknown" and r["status"] == "unavailable"
-    assert r["reasons"].startswith("LLM unavailable: InvalidOutput (risk claimed without a cited breaking change)")
+def test_medium_when_removals_apply_but_repo_does_not_use_them(cache):
+    r = run(cache, FakeLLM(LLM_CHANGES, SYMS), ctx=repo({"app.py": "import werkzeug.serving\n"}))
+    assert r["breaking_risk"] == "medium" and "the repo does not use the affected APIs" in r["risk_reason"]
 
 
-def test_low_risk_with_no_changes_is_fine(cache):
-    only_deprecation = ReleaseNotes("pallets/werkzeug", NOTES.items[1:])
-    r = run(FakeLLM(answer(risk="low", reasons="Nothing that breaks callers.")), cache, only_deprecation)
-    assert (r["breaking_risk"], r["breaking_changes"], r["status"]) == ("low", [], "ok")
+def test_low_when_only_runtime_drops_that_do_not_apply(cache):
+    notes = ReleaseNotes("pallets/werkzeug", [NOTES.items[2], NOTES.items[3]])
+    r = run(cache, FakeLLM(LLM_CHANGES[1:]), notes)
+    assert r["breaking_risk"] == "low" and "runtime drops do not apply: repo uses Python 3.12" in r["risk_reason"]
+    drop = next(c for c in r["breaking_changes"] if c["runtime_drop"])
+    assert drop["applicable"] is False and drop["not_applicable"] == "not applicable (repo uses Python 3.12)"
 
 
-def test_low_risk_is_raised_when_notes_show_removed_deprecations(cache):
-    r = run(FakeLLM(answer(risk="low", reasons="Looks fine.")), cache)
-    assert r["breaking_risk"] == "medium" and "raised from low" in r["reasons"]
+def test_runtime_drop_counts_when_repo_still_runs_that_python(cache):
+    notes = ReleaseNotes("pallets/werkzeug", [NOTES.items[2]])
+    r = run(cache, FakeLLM(LLM_CHANGES[1:2]), notes, ctx=repo(python=("3.8", "3.12")))
+    assert r["breaking_risk"] == "medium" and r["breaking_changes"][0]["applicable"] is True
 
 
-def test_banned_wording_in_reasons_retried(cache):
-    llm = FakeLLM(answer(("x", U1), reasons="All issues resolved."), answer(("x", U1)))
-    assert run(llm, cache)["status"] == "ok" and len(llm.calls) == 2
+def test_llm_text_cannot_set_the_level(cache):
+    notes = ReleaseNotes("pallets/werkzeug", [NOTES.items[3]])
+    r = run(cache, FakeLLM(LLM_CHANGES[2:], reasons="Extremely high risk, everything breaks."), notes)
+    assert r["breaking_risk"] == "low" and r["reasons"].startswith("Extremely high risk")
+
+
+def test_without_repo_usage_is_not_checked(cache):
+    r = run(cache, FakeLLM(LLM_CHANGES, SYMS), ctx=None)
+    assert r["breaking_risk"] == "medium" and "repo code was not checked (no --repo)" in r["risk_reason"]
+
+
+# ---------- symbols ----------
+
+def test_symbols_must_be_grounded_in_the_change_text():
+    text = "Removed the werkzeug.urls module (Deprecate the ``werkzeug.urls`` module.)"
+    assert grounded("werkzeug.urls.url_quote", "werkzeug", text) == "werkzeug.urls"     # trimmed to what's cited
+    assert grounded("werkzeug.secret.thing", "werkzeug", text) is None                   # invented
+    assert grounded("flask.urls", "werkzeug", text) is None                              # other package
+    assert grounded("url_quote", "werkzeug", text) is None                               # not qualified
+
+
+def test_backticked_names_work_even_when_the_llm_is_down(cache):
+    r = run(cache, FakeLLM(LLMError("HTTP 503"), LLMError("HTTP 503")))
+    assert r["status"] == "unavailable" and r["breaking_risk"] == "high"       # deterministic pairs + ast
+    assert "werkzeug.urls" in r["symbols"] and r["usages"][0]["line"] == 2
+
+
+def test_symbols_from_runtime_drops_are_not_extracted(cache):
+    llm = FakeLLM(LLM_CHANGES[1:2], SYMS)
+    r = run(cache, llm, ReleaseNotes("pallets/werkzeug", [NOTES.items[2]]))
+    assert r["symbols"] == [] and "removed_symbols" not in llm.calls
+
+
+# ---------- citations, notes, wording ----------
+
+def test_uncited_changes_dropped(cache):
+    r = run(cache, FakeLLM(LLM_CHANGES + [("Invented change", "https://example.com/made-up")], SYMS))
+    assert r["dropped_uncited"] == 1
+    assert all(c["source_url"] != "https://example.com/made-up" for c in r["breaking_changes"])
 
 
 def test_no_notes_means_no_llm_call(cache):
-    llm = FakeLLM(answer(("x", U1)))
-    r = run(llm, cache, ReleaseNotes(None, note="no release notes found (no GitHub repository in PyPI project_urls)"))
+    llm = FakeLLM(LLM_CHANGES)
+    r = run(cache, llm, ReleaseNotes(None, note="no release notes found (no GitHub repository in PyPI project_urls)"))
     assert llm.calls == [] and r["breaking_risk"] == "unknown"
-    assert r["reasons"] == "no release notes found (no GitHub repository in PyPI project_urls)"
+    assert r["risk_reason"] == "no release notes found (no GitHub repository in PyPI project_urls)"
 
 
-def test_llm_down_is_unknown_not_low(cache):
-    r = run(FakeLLM(LLMError("HTTP 429")), cache)
-    assert r["breaking_risk"] == "unknown" and "LLM unavailable: HTTP 429" in r["reasons"]
+def test_banned_wording_in_reasons_retried(cache):
+    llm = FakeLLM(LLM_CHANGES, reasons=["All issues resolved.", "Removals matter most."])
+    r = run(cache, llm)
+    assert r["status"] == "ok" and llm.calls.count("upgrade_breaking_changes") == 2
 
 
-def test_cached_answer_gets_same_citation_check(cache):
-    llm = FakeLLM(answer(("x", U1)))
-    run(llm, cache)
-    r = run(llm, cache)
-    assert r["status"] == "cached" and len(llm.calls) == 1 and r["breaking_changes"][0]["source_url"] == U1
-
-
-# ---------- deterministic deprecation -> removal pairs ----------
-
-from triage.risk import deprecation_removals  # noqa: E402
-
-U3 = "https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L279"
-U4 = "https://github.com/pallets/werkzeug/releases/tag/3.1.0"
-CHAIN = ReleaseNotes("pallets/werkzeug", [
-    NoteItem("2.3.0", "Remove previously deprecated code.", "https://x/L390", "changelog"),
-    NoteItem("2.3.0", "Deprecate the ``werkzeug.urls`` module.", U2, "changelog"),
-    NoteItem("3.0.0", "Remove previously deprecated code. :pr:`2768`", U1, "changelog"),
-    NoteItem("3.0.0", "Deprecate the ``__version__`` attribute.", U3, "changelog"),
-    NoteItem("3.1.0", "Remove previously deprecated code. #2967", U4, "github_release")])
-
+# ---------- deprecation -> removal pairs ----------
 
 def test_removal_pairs_with_deprecations_since_the_previous_removal():
-    pairs = [(p["deprecated_in"], p["removed_in"], p["deprecation_url"]) for p in deprecation_removals(CHAIN.items)]
-    assert pairs == [("2.3.0", "3.0.0", U2), ("3.0.0", "3.1.0", U3)]
+    items = [NoteItem("2.3.0", "Remove previously deprecated code.", "u0", "changelog"),
+             NoteItem("2.3.0", "Deprecate the ``werkzeug.urls`` module.", "u1", "changelog"),
+             NoteItem("3.0.0", "Remove previously deprecated code.", "u2", "changelog"),
+             NoteItem("3.0.0", "Deprecate the ``__version__`` attribute.", "u3", "changelog"),
+             NoteItem("3.1.0", "Remove previously deprecated code.", "u4", "github_release")]
+    assert [(p["deprecated_in"], p["removed_in"], p["deprecation_url"]) for p in deprecation_removals(items)] == \
+        [("2.3.0", "3.0.0", "u1"), ("3.0.0", "3.1.0", "u3")]
 
 
-def test_pairs_the_llm_left_out_are_added_with_citation(cache):
-    r = run(FakeLLM(answer(("Python 3.7 dropped", U1))), cache, CHAIN)
-    urls = [c["source_url"] for c in r["breaking_changes"]]
-    assert urls == [U1, U2, U3]
-    urls_change = next(c for c in r["breaking_changes"] if c["source_url"] == U2)
-    assert urls_change["from"] == "release_notes" and "werkzeug.urls" in urls_change["change"]
-    assert f"then 3.0.0 removed previously deprecated code ({U1})" in urls_change["change"]
+# ---------- rendering ----------
 
-
-def test_pairs_shown_even_when_llm_is_down(cache):
-    r = run(FakeLLM(LLMError("HTTP 503")), cache, CHAIN)
-    assert r["breaking_risk"] == "unknown" and [c["source_url"] for c in r["breaking_changes"]] == [U2, U3]
+def test_render_puts_used_changes_first_and_marks_not_applicable(cache):
+    r = run(cache, FakeLLM(LLM_CHANGES, SYMS))
+    lines = render_risk(r, top=1)
+    assert lines[0].startswith("breaking risk: high - repo uses werkzeug.urls.url_quote")
+    assert lines[1].strip().startswith("app.py:2") and lines[2].strip().startswith("app.py:6")
+    assert lines[3].startswith("  - [used by repo] ")
+    assert any(l.startswith("  ... ") and "(--verbose)" in l for l in lines)
+    assert any("not applicable (repo uses Python 3.12): 1 runtime-drop item(s), not counted" in l for l in lines)

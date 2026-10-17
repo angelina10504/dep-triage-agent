@@ -65,7 +65,8 @@ class FakeHttp:
 
     def get(self, url, params=None, headers=None, timeout=None):
         self.calls.append((url, headers))
-        return self.routes.get(url, Resp(404, "not found"))
+        key = f"{url}?ref={params['ref']}" if params and "ref" in params else url
+        return self.routes.get(key, Resp(404, "not found"))
 
 
 def world(changes=CHANGES, releases=RELEASES, project_urls=None):
@@ -73,7 +74,7 @@ def world(changes=CHANGES, releases=RELEASES, project_urls=None):
         "https://pypi.org/pypi/werkzeug/json": Resp(200, {"info": {"project_urls": project_urls or {
             "Documentation": "https://werkzeug.palletsprojects.com/", "Source": "https://github.com/pallets/werkzeug/"}}}),
         "https://api.github.com/repos/pallets/werkzeug/releases": Resp(200, releases),
-        "https://raw.githubusercontent.com/pallets/werkzeug/3.1.0/CHANGES.rst": Resp(200, changes),
+        "https://api.github.com/repos/pallets/werkzeug/contents/CHANGES.rst?ref=3.1.0": Resp(200, changes),
     })
 
 
@@ -104,7 +105,7 @@ def test_changelog_items_cite_the_exact_lines_at_the_target_tag():
     assert removed.source_url == "https://github.com/pallets/werkzeug/blob/3.1.0/CHANGES.rst#L11"
     multi = next(i for i in n.items if "continued on a second line" in i.text)
     assert multi.source_url.endswith("#L14-L16")
-    assert "https://raw.githubusercontent.com/pallets/werkzeug/3.1.0/CHANGES.rst" in n.fetched_urls
+    assert "https://api.github.com/repos/pallets/werkzeug/contents/CHANGES.rst?ref=3.1.0" in n.fetched_urls
 
 
 def test_only_relevant_items_are_kept_feature_releases_first():
@@ -115,11 +116,13 @@ def test_only_relevant_items_are_kept_feature_releases_first():
     assert n.items[0].version == "3.0.0"                        # x.0.0 before x.y.0 before patches
 
 
-def test_github_token_only_sent_to_github():
+def test_github_token_only_sent_to_the_github_api():
     http = world()
     fetch_release_notes("werkzeug", "2.2.2", "3.1.0", session=http, github_token="secret")
     for url, headers in http.calls:
-        assert ("Authorization" in (headers or {})) == ("github" in url)
+        assert ("Authorization" in (headers or {})) == url.startswith("https://api.github.com/")
+    raw = [h for u, h in http.calls if "/contents/" in u]
+    assert raw and raw[0]["Accept"] == "application/vnd.github.raw"
 
 
 def test_no_github_repo_means_no_release_notes_found():

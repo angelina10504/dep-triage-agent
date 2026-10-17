@@ -81,6 +81,8 @@ def _ask(payload: dict) -> dict | None:
                   f"but the file on the base branch still pins the vulnerable version -> new action, "
                   f"attempt {prop['attempt']})")
         print(prop["render"])
+        if prop.get("risk"):
+            print("Risk:   " + "\n        ".join(prop["risk"]))
         try:
             answer = input("Open this PR? [y/N] ")
         except EOFError:
@@ -89,25 +91,39 @@ def _ask(payload: dict) -> dict | None:
     return answers
 
 
-def _drive(graph, config, first_input) -> int:
+def _stream(graph, inp, config) -> None:
+    """Run until the next pause/end, printing one progress line per finished node."""
+    import time
+
+    from .graph import progress
+    t0 = time.monotonic()
+    for update in graph.stream(inp, config, stream_mode="updates"):
+        for node, value in update.items():
+            line = "waiting for your y/N" if node == "__interrupt__" else progress(node, value)
+            label = "human_approval" if node == "__interrupt__" else node
+            print(f"  [{time.monotonic() - t0:5.1f}s] {label}: {line}", flush=True)
+
+
+def _drive(graph, config, first_input, verbose: bool = False) -> int:
     """Run (or resume) until the graph finishes or waits for a human who is not there."""
     from langgraph.types import Command
 
     from .graph import pending_interrupt
     thread = config["configurable"]["thread_id"]
     if first_input is not None:
-        graph.invoke(first_input, config)
+        print(f"thread {thread}")
+        _stream(graph, first_input, config)
     while (payload := pending_interrupt(graph, config)) is not None:
         answers = _ask(payload)
         if answers is None:
             print(f"\nPaused at human_approval. Resume with: python -m triage resume --thread {thread}")
             return 0
-        graph.invoke(Command(resume=answers), config)
+        _stream(graph, Command(resume=answers), config)
     values = graph.get_state(config).values
     if "report_text" not in values:
         print(f"error: no run found for thread {thread}", file=sys.stderr)
         return 1
-    print(values["report_text"])
+    print(values["report_verbose" if verbose and "report_verbose" in values else "report_text"])
     print(f"\n(thread {thread})")
     return 0
 
@@ -130,14 +146,18 @@ def _run(argv: list[str], resume: bool = False) -> int:
     ap.add_argument("--no-wait", action="store_true", help="observe CI once instead of waiting for a result")
     ap.add_argument("--timeout", type=float, default=600, help="seconds to wait for CI at most")
     ap.add_argument("--interval", type=float, default=15, help="seconds between CI polls")
+    ap.add_argument("--verbose", action="store_true", help="full report: every advisory decision, all evidence")
+    if not resume:
+        ap.add_argument("--dry-run", action="store_true",
+                        help="read the repo for repo-aware risk, but propose and open nothing")
     args = ap.parse_args(argv)
 
     thread = args.thread or f"triage-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
     graph = build_graph(_runtime(args, wait=not args.no_wait), sqlite_checkpointer(args.checkpoints))
     config = {"configurable": {"thread_id": thread}}
     first = None if resume else {"requirements_path": args.requirements, "repo": args.repo,
-                                 "base": args.base, "path": args.path}
-    return _drive(graph, config, first)
+                                 "base": args.base, "path": args.path, "dry_run": args.dry_run}
+    return _drive(graph, config, first, verbose=args.verbose)
 
 
 def _graph_doc(argv: list[str]) -> int:
@@ -169,6 +189,7 @@ def _status(argv: list[str]) -> int:
     ap.add_argument("--timeout", type=float, default=600, help="seconds to wait at most (with --wait)")
     ap.add_argument("--interval", type=float, default=15, help="seconds between polls (with --wait)")
     ap.add_argument("--no-diagnose", action="store_true", help="skip the CI failure diagnosis")
+    ap.add_argument("--verbose", action="store_true", help="also list every advisory ID per PR")
     args = ap.parse_args(argv)
 
     _load_dotenv()
@@ -190,16 +211,17 @@ def _status(argv: list[str]) -> int:
     extra = {}
     if not args.no_diagnose:
         from .diagnose import diagnose_failure, render_diagnosis
-        from .llm import LLMCache
+        from .llm import LLMCache, llm_budget
         cache = LLMCache(args.db)
-        for st in statuses:
-            if st.pr_state == "open" and st.ci_status == "failing":
+        failing = [st for st in statuses if st.pr_state == "open" and st.ci_status == "failing"]
+        with llm_budget(30):
+            for st in failing:
                 r = st.record
                 current = r.dependency_id.split("@", 1)[1].split("#", 1)[0]
                 extra[r.pr_number] = render_diagnosis(diagnose_failure(
                     args.repo, r.pr_number, r.package or r.dependency_id, current, r.target_version,
                     [c.__dict__ for c in st.checks], client, cache))
-    print(render_table(statuses, extra))
+    print(render_table(statuses, extra, verbose=args.verbose))
     if timed_out:
         print(f"\nTimed out after {args.timeout:.0f}s; pending CI is still pending (not passing).")
     return 0
@@ -226,6 +248,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="full agent run (same as 'run'): risk, y/N approval, PRs, CI, diagnosis")
     ap.add_argument("--thread", help="with --open-prs: thread id for the run")
     ap.add_argument("--no-wait", action="store_true", help="with --open-prs: observe CI once")
+    ap.add_argument("--verbose", action="store_true", help="every per-advisory decision and TC2 detail")
+    ap.add_argument("--dry-run", action="store_true", help="with --open-prs: propose and open nothing")
     ap.add_argument("--explain", action="store_true",
                     help="add LLM explanations (LLM_PROVIDER, default groq); never affects decisions")
     args = ap.parse_args(argv)
@@ -234,7 +258,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.open_prs:
         rest = [args.requirements, "--repo", args.repo, "--path", args.path, "--db", args.db]
         rest += (["--base", args.base] if args.base else []) + (["--thread", args.thread] if args.thread else [])
-        return _run(rest + (["--no-wait"] if args.no_wait else []))
+        rest += ["--no-wait"] if args.no_wait else []
+        rest += (["--verbose"] if args.verbose else []) + (["--dry-run"] if args.dry_run else [])
+        return _run(rest)
 
     with open(args.requirements) as f:
         result = scan(f.read())
@@ -243,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result.to_dict(), indent=2, default=str))
         return 0
 
-    print(format_scan(result.plans, result.matches, result.warnings))
+    print(format_scan(result.plans, result.matches, result.warnings, verbose=args.verbose))
     if args.explain:
         _explanations(args, result)
     return 0

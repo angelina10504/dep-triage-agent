@@ -1,0 +1,41 @@
+thread triage-20261017-231217
+  [  0.0s] collect: 4 dependencies
+  [ 10.3s] fetch_advisories: 48 advisory records from osv.dev
+  [ 10.3s] match: 48 decisions
+  [ 10.3s] plan: requests upgrade, Werkzeug upgrade, MarkupSafe no_action, Markdown no_action
+  [ 15.8s] assess_upgrade_risk: requests medium, Werkzeug high
+  [ 18.6s] human_approval: dry run: nothing proposed for approval, no PRs opened
+  [ 18.6s] open_pr: requests: reused (PR still open), Werkzeug: reused (PR still open)
+  [ 18.6s] watch_ci: no PRs to watch
+  [ 18.6s] report: done
+== PLAN ==
+
+PACKAGE       CURRENT   TARGET    STATUS     REASON
+requests      2.28.0    2.33.0    upgrade    upgrade to 2.33.0 fixes 4 vulnerabilities (8 advisory records)
+Werkzeug      2.2.2     3.1.9     upgrade    upgrade to 3.1.9 fixes 10 vulnerabilities (20 advisory records)
+MarkupSafe    2.1.5     -         no_action  no advisory affects the installed version
+Markdown      3.11.1    -         no_action  no advisory affects the installed version
+TC2: 1 same-name advisory in other ecosystems excluded (npm/markdown) - details with --verbose
+repo: Python 3.12 (.github/workflows/ci.yml), 2 .py files searched at main
+
+== UPGRADE RISK (computed from release notes + repo code) ==
+requests 2.28.0 -> 2.33.0
+  breaking risk: medium - 1 applicable removal(s)/rename(s) in the release notes, but the repo does not use the affected APIs
+    - Internal method _get_connection was renamed to public API get_connection_with_tls_context; get_connection is deprecated for all versions >=2.32.0. (https://github.com/psf/requests/releases/tag/v2.32.2)
+    - Response.text() and apparent_encoding now default to UTF-8 when neither chardet nor charset_normalizer is installed, instead of attempting charset detection. (https://github.com/psf/requests/releases/tag/v2.32.0)
+    not applicable (repo uses Python 3.12): 5 runtime-drop item(s), not counted
+Werkzeug 2.2.2 -> 3.1.9
+  breaking risk: high - repo uses werkzeug.urls.url_quote at app.py:6, app.py:10 -> likely to break
+    app.py:6  from werkzeug.urls import url_quote
+    app.py:10  return url_quote(path)
+    - [used by repo] Deprecate the ``werkzeug.urls`` module, except for the ``uri_to_iri`` and ``iri_to_uri`` functions. Use the ``urllib.parse`` library instead. :issue:`2600` (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L397-L398)
+    - [used by repo] The ``werkzeug.urls`` module (except ``uri_to_iri`` and ``iri_to_uri``) was removed. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L278)
+    - Deprecate ``werkzeug.wsgi.make_line_iter`` and ``make_chunk_iter``. :pr:`2613` (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L405)
+    ... 40 more applicable change(s) (--verbose)
+
+== ACTIONS ==
+dry run: nothing proposed for approval, no PRs opened
+requests (attempt 2, triage/requests-2.33.0-2): reused (PR still open) -> PR #3 https://github.com/angelina10504/dep-triage-demo/pull/3
+Werkzeug (attempt 1, triage/werkzeug-3.1.9): reused (PR still open) -> PR #2 https://github.com/angelina10504/dep-triage-demo/pull/2
+
+(thread triage-20261017-231217)

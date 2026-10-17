@@ -27,9 +27,10 @@ from .ci_watch import PrStatus, render_table, watch
 from .diagnose import diagnose_failure, render_diagnosis
 from .explain import Explanation, explain, with_explanation
 from .github_pr import GitHubClient, Proposal, build_proposal, open_pr, resolve
-from .llm import LLMCache
+from .llm import LLMCache, llm_budget
 from .models import AdvisoryMatch, Decision, Dependency, PlanStatus, UpgradePlan
 from .parser import parse_requirements
+from .repo_context import fetch_repo_context
 from .report import format_scan
 from .risk import assess_upgrade_risk, render_risk
 from .scanner import OTHER_ECOSYSTEMS, fetch_all, match_all, plan_all
@@ -45,6 +46,8 @@ class TriageState(TypedDict, total=False):
     repo: str | None
     base: str | None
     path: str
+    dry_run: bool
+    repo_summary: dict
     dependencies: list[dict]
     fetched: dict
     warnings: list[str]
@@ -60,6 +63,7 @@ class TriageState(TypedDict, total=False):
     ci_timed_out: bool
     diagnoses: dict[str, dict]
     report_text: str
+    report_verbose: str
 
 
 @dataclass
@@ -78,6 +82,7 @@ class Runtime:
     sleep: Callable[[float], None] | None = None
     clock: Callable[[], float] | None = None
     approved_by: str | None = None
+    llm_budget: float | None = 30            # max seconds of LLM time per node (then deterministic only)
     _client: GitHubClient | None = field(default=None, repr=False)
 
     def client(self) -> GitHubClient:
@@ -128,19 +133,35 @@ def build_graph(rt: Runtime, checkpointer=None):
 
     def assess(s: TriageState):
         deps = {d.id: d for d in _deps(s)}
-        risks, explanations = {}, {}
-        for p in _plans(s):
-            if p.status != PlanStatus.UPGRADE:
-                continue
+        upgrades = [p for p in _plans(s) if p.status == PlanStatus.UPGRADE]
+        risks, explanations, out = {}, {}, {}
+        ctx = None
+        if upgrades and s.get("repo"):                 # repo-aware risk: Python version + API usage
+            try:
+                client = rt.client()
+                base = s.get("base") or client.default_branch(s["repo"])
+                ctx = fetch_repo_context(client, s["repo"], base)
+                out = {"base": base, "repo_summary": {"python": ctx.python_label, "python_source": ctx.python_source,
+                                                      "py_files": len(ctx.files), "ref": base, "note": ctx.note}}
+            except Exception as e:                     # can't read the repo: risk stays repo-unaware, say so
+                out = {"repo_summary": {"error": f"{type(e).__name__}: {str(e)[:120]}"}}
+        notes = {}
+        for p in upgrades:
             name = deps[p.dependency_id].name
             try:
-                notes = (rt.notes or release_notes.fetch_release_notes)(name, p.current_version, p.target_version)
+                notes[p.dependency_id] = (rt.notes or release_notes.fetch_release_notes)(
+                    name, p.current_version, p.target_version)
             except Exception as e:                    # network etc.: say so, don't guess
-                notes = release_notes.ReleaseNotes(None, note=f"no release notes found ({type(e).__name__})")
-            risks[p.dependency_id] = assess_upgrade_risk(p.package, p.current_version, p.target_version,
-                                                         notes, rt.cache, rt.llm)
-            explanations[p.dependency_id] = asdict(explain(p, _matches(s), rt.cache, rt.llm))
-        return {"risks": risks, "explanations": explanations}
+                notes[p.dependency_id] = release_notes.ReleaseNotes(None, note=f"no release notes found ({type(e).__name__})")
+        with llm_budget(rt.llm_budget):               # risk for every package first, explanations last
+            for p in upgrades:
+                risks[p.dependency_id] = assess_upgrade_risk(
+                    p.package, p.current_version, p.target_version, notes[p.dependency_id], rt.cache, rt.llm,
+                    repo=ctx, import_name=deps[p.dependency_id].name.replace("-", "_"))
+            for p in upgrades:
+                explanations[p.dependency_id] = asdict(explain(p, _matches(s), rt.cache, rt.llm,
+                                                               risk=risks[p.dependency_id]))
+        return {**out, "risks": risks, "explanations": explanations}
 
     def human_approval(s: TriageState):
         upgrades = [p for p in _plans(s) if p.status == PlanStatus.UPGRADE]
@@ -165,14 +186,20 @@ def build_graph(rt: Runtime, checkpointer=None):
                                 "reason": res.reason, "proposal": asdict(res.proposal),
                                 "pr": {k: res.pr.get(k) for k in ("number", "html_url", "state", "merged_at")}
                                 if res.pr else None})
+        for r in resolutions:
+            if (risk := s.get("risks", {}).get(r["dependency_id"])):
+                r["risk_lines"] = render_risk(risk)
         pending = [r for r in resolutions if r["action"] == "new"]
         approvals: dict[str, bool] = {}
+        if s.get("dry_run"):
+            return {"resolutions": resolutions, "approvals": {}, "notice": "dry run: nothing proposed for approval, no PRs opened"}
         if pending:
             answers = interrupt({
                 "question": "Open these upgrade PRs? (each needs an explicit yes)",
                 "proposals": [{"key": _key(r["proposal"]), "package": r["package"],
                                "attempt": r["proposal"]["attempt"], "reason": r["reason"],
                                "render": Proposal(**r["proposal"]).render(),
+                               "risk": r.get("risk_lines", []),
                                "previous_pr": r["pr"]} for r in pending],
             })
             answers = answers if isinstance(answers, dict) else {}
@@ -189,6 +216,8 @@ def build_graph(rt: Runtime, checkpointer=None):
                             "pr_url": r["pr"]["html_url"]})
             elif r["action"] == "no_action":
                 prs.append({**row, "outcome": "no action", "reason": r["reason"]})
+            elif s.get("dry_run"):
+                prs.append({**row, "outcome": "dry run - would propose a new PR"})
             elif s.get("approvals", {}).get(_key(r["proposal"])) is True:
                 res = open_pr(Proposal(**r["proposal"]), rt.client(), rt.store, rt.approved_by)
                 prs.append({**row, "outcome": res.outcome, "pr_number": res.pr_number, "pr_url": res.pr_url})
@@ -197,7 +226,7 @@ def build_graph(rt: Runtime, checkpointer=None):
         return {"prs": prs}
 
     def watch_ci(s: TriageState):
-        if not s.get("repo") or not rt.store.with_prs(s["repo"]):
+        if s.get("dry_run") or not s.get("repo") or not rt.store.with_prs(s["repo"]):
             return {"ci": [], "ci_timed_out": False, "diagnoses": {}}
         just_opened = frozenset(p["pr_number"] for p in s.get("prs", []) if p["outcome"] == "created")
         kw = {k: v for k, v in (("sleep", rt.sleep), ("clock", rt.clock)) if v is not None}
@@ -210,6 +239,10 @@ def build_graph(rt: Runtime, checkpointer=None):
         return "diagnose_failure" if failing else "report"
 
     def diagnose(s: TriageState):
+        with llm_budget(rt.llm_budget):
+            return _diagnose(s)
+
+    def _diagnose(s: TriageState):
         out = {}
         for c in s["ci"]:
             if c["pr_state"] == "open" and c["ci_status"] == "failing":
@@ -221,15 +254,23 @@ def build_graph(rt: Runtime, checkpointer=None):
         return {"diagnoses": out}
 
     def report(s: TriageState):
+        return {"report_text": _report(s, verbose=False), "report_verbose": _report(s, verbose=True)}
+
+    def _report(s: TriageState, verbose: bool) -> str:
         plans = _plans(s)
-        out = ["== PLAN ==", format_scan(plans, _matches(s), s.get("warnings", []))]
+        out = ["== PLAN ==", format_scan(plans, _matches(s), s.get("warnings", []), verbose=verbose)]
+        rs = s.get("repo_summary") or {}
+        if rs:
+            out.append("repo: " + (f"Python {rs['python']} ({rs['python_source'] or 'not found'}), "
+                                   f"{rs['py_files']} .py files searched at {rs['ref']}" + (f"; {rs['note']}" if rs.get("note") else "")
+                                   if "error" not in rs else f"could not be read ({rs['error']}); risk is not repo-aware"))
         if s.get("risks"):
-            out.append("\n== UPGRADE RISK (from fetched release notes) ==")
+            out.append("\n== UPGRADE RISK (computed from release notes + repo code) ==")
             for p in plans:
                 if (risk := s["risks"].get(p.dependency_id)):
-                    out.append(f"{p.package} {p.current_version} -> {p.target_version} [{risk['status']}]")
-                    out += [f"  {line}" for line in render_risk(risk)]
-        if s.get("explanations"):
+                    out.append(f"{p.package} {p.current_version} -> {p.target_version}")
+                    out += [f"  {line}" for line in render_risk(risk, verbose=verbose)]
+        if verbose and s.get("explanations"):
             out.append("\n== EXPLANATION (LLM, advisory only) ==")
             for p in plans:
                 if (e := s["explanations"].get(p.dependency_id)):
@@ -245,10 +286,10 @@ def build_graph(rt: Runtime, checkpointer=None):
         if s.get("ci"):
             out.append("\n== TRIAGE TABLE (PR + CI) ==")
             extra = {int(n): render_diagnosis(d) for n, d in s.get("diagnoses", {}).items()}
-            out.append(render_table([PrStatus.from_dict(c) for c in s["ci"]], extra))
+            out.append(render_table([PrStatus.from_dict(c) for c in s["ci"]], extra, verbose=verbose))
             if s.get("ci_timed_out"):
                 out.append("\nTimed out waiting for CI; pending CI is still pending (not passing).")
-        return {"report_text": "\n".join(out)}
+        return "\n".join(out)
 
     g = StateGraph(TriageState)
     for name, fn in [("collect", collect), ("fetch_advisories", fetch_advisories), ("match", match),
@@ -279,3 +320,31 @@ def pending_interrupt(graph, config) -> dict | None:
 
 def mermaid(graph) -> str:
     return graph.get_graph().draw_mermaid()
+
+
+def progress(node: str, update: dict) -> str:
+    """One short line per finished node, for the CLI."""
+    u = update or {}
+    if node == "collect":
+        return f"{len(u.get('dependencies', []))} dependencies"
+    if node == "fetch_advisories":
+        f = u.get("fetched", {})
+        n = sum(len(v["advisories"]) + sum(len(o["advisories"]) for o in v["other"]) for v in f.values())
+        errors = [k for k, v in f.items() if v["error"]]
+        return f"{n} advisory records from osv.dev" + (f", {len(errors)} unavailable" if errors else "")
+    if node == "match":
+        return f"{len(u.get('matches', []))} decisions"
+    if node == "plan":
+        ps = u.get("plans", [])
+        return ", ".join(f"{p['package']} {p['status']}" for p in ps)
+    if node == "assess_upgrade_risk":
+        return ", ".join(f"{r['package']} {r['breaking_risk']}" for r in u.get("risks", {}).values()) or "no upgrades"
+    if node == "human_approval":
+        return u.get("notice") or ", ".join(f"{r['package']}: {r['action']}" for r in u.get("resolutions", []))
+    if node == "open_pr":
+        return ", ".join(f"{p['package']}: {p['outcome']}" for p in u.get("prs", [])) or "nothing to do"
+    if node == "watch_ci":
+        return ", ".join(f"PR #{c['record']['pr_number']} {c['ci_status']}" for c in u.get("ci", [])) or "no PRs to watch"
+    if node == "diagnose_failure":
+        return ", ".join(f"PR #{n} {d['status']}" for n, d in u.get("diagnoses", {}).items())
+    return "done"

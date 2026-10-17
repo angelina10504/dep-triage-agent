@@ -143,7 +143,7 @@ def watch(repo: str, client: GitHubClient, store: ActionStore, wait: bool = Fals
     return list(latest.values()), False
 
 
-def render_table(statuses: list[PrStatus], extra: dict[int, list[str]] | None = None) -> str:
+def render_table(statuses: list[PrStatus], extra: dict[int, list[str]] | None = None, verbose: bool = True) -> str:
     """extra: more evidence lines per PR number (e.g. a CI failure diagnosis)."""
     rows = [("PACKAGE", "ADVISORIES", "PR", "PR STATE", "CI", "OUTCOME")]
     for s in statuses:
@@ -160,7 +160,7 @@ def render_table(statuses: list[PrStatus], extra: dict[int, list[str]] | None = 
         r = s.record
         lines.append(f"  {r.package or r.dependency_id} PR #{r.pr_number} @ {s.head_sha[:7]} "
                      f"(observed {s.observed_at}; intended: CI passing, observed: {s.ci_status})")
-        if r.advisories:
+        if r.advisories and verbose:
             lines.append(f"    advisories: {', '.join(a['id'] for a in r.advisories)}")
         for c in s.checks or []:
             lines.append(f"    [{c.state}] {c.kind} {c.name}: {c.url or '-'}")

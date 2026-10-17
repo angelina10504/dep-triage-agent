@@ -24,7 +24,7 @@ if git diff --quiet -- requirements.txt; then
   echo "already pinned to $PIN; nothing to push"
   exit 0
 fi
-git diff -- requirements.txt
+git --no-pager diff -- requirements.txt
 git add requirements.txt
 git commit --quiet -m "Reset demo: pin $PIN for the next TC1 run"
 git push --quiet origin HEAD:main            # plain push: rejected if main moved, never forced

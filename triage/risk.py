@@ -1,8 +1,15 @@
-"""assess_upgrade_risk: how likely is the upgrade to break code, from fetched release notes.
+"""assess_upgrade_risk: will THIS repo break on the upgrade? Decided in code, explained by the LLM.
 
-The LLM sees only the relevant release-note items (release_notes.py) and must cite one of
-their URLs for every breaking change. Anything citing a URL we did not fetch is dropped.
-No notes -> "no release notes found", no LLM call. LLM down -> risk "unknown".
+1. Release notes between the versions (release_notes.py), relevant items only.
+2. LLM lists breaking changes, each citing a fetched URL (uncited ones are dropped);
+   deterministic "deprecated in X, removed in Y" pairs are always added.
+3. Runtime drops ("Drop support for Python 3.8") are marked not applicable when the repo
+   runs a newer Python (repo_context.py) and do not count.
+4. LLM extracts the removed/renamed API symbols (JSON); each must be grounded in the
+   change text. Backticked dotted names from the notes are added deterministically.
+5. The repo's .py files are searched for those symbols (ast, file:line evidence).
+6. breaking_risk, in code: high = repo uses a removed API, medium = applicable removals
+   but no use found, low = nothing applicable. The LLM's text never sets the level.
 """
 from __future__ import annotations
 
@@ -11,28 +18,30 @@ import re
 
 from packaging.version import Version
 
-from .llm import LLMCache, LLMError, LLMProvider, ask_json
+from .llm import LLMCache, LLMProvider, ask_json
 from .release_notes import NoteItem, ReleaseNotes
+from .repo_context import RepoContext, Usage, drop_applies, find_usages, runtime_drop
 
 _REMOVES_DEPRECATED = re.compile(r"remov\w*\s+(?:all\s+)?(?:previously\s+)?deprecated", re.IGNORECASE)
 _DEPRECATES = re.compile(r"\bdeprecat", re.IGNORECASE)
+_REMOVAL = re.compile(r"\b(remov\w*|renam\w*|no longer (?:available|exists|accepted|exported)|deleted?)\b",
+                      re.IGNORECASE)
+_BACKTICKED = re.compile(r"`{1,2}([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)`{1,2}")
+_DOTTED = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$")
 
 SYSTEM = (
-    "You assess whether upgrading a Python dependency may break the code that uses it. You get the "
-    "release-note items between the current and target version, each with a source_url. List only "
-    "changes that can break callers (removed or renamed APIs, removed previously deprecated code, "
-    "dropped Python versions, changed defaults). Quote or closely paraphrase the item, and set "
-    "source_url to EXACTLY the source_url of the item you used. Never cite anything else. When a "
-    "release says it removes previously deprecated code, the APIs deprecated in EARLIER versions of "
-    "the given range are what disappears; deprecated_then_removed lists these pairs. Include each pair "
-    "as a breaking change citing its deprecation_url. "
-    "breaking_risk: high (removals of APIs likely in use or a major version jump with "
-    "removals), medium (behaviour or default changes), low (nothing found). Plain English, no markdown."
+    "You read release-note items between the current and target version of a Python dependency and "
+    "list the changes that can break callers: removed or renamed APIs, removed previously deprecated "
+    "code, dropped Python versions, changed defaults. Quote or closely paraphrase each item and set "
+    "source_url to EXACTLY the source_url of the item you used; never cite anything else. When a "
+    "release removes previously deprecated code, the APIs deprecated earlier in the range are what "
+    "disappears; deprecated_then_removed lists these pairs - include each, citing its deprecation_url. "
+    "reasons: one or two sentences on which changes matter most for a typical caller. Do not rate the "
+    "risk; that is computed elsewhere. Plain English, no markdown."
 )
 SCHEMA = {
     "type": "object",
     "properties": {
-        "breaking_risk": {"type": "string", "enum": ["high", "medium", "low"]},
         "breaking_changes": {"type": "array", "items": {
             "type": "object",
             "properties": {"change": {"type": "string"}, "source_url": {"type": "string"}},
@@ -41,7 +50,24 @@ SCHEMA = {
         }},
         "reasons": {"type": "string"},
     },
-    "required": ["breaking_risk", "breaking_changes", "reasons"],
+    "required": ["breaking_changes", "reasons"],
+    "additionalProperties": False,
+}
+SYMBOLS_SYSTEM = (
+    "For each numbered breaking change, list the Python API symbols it removes or renames, as fully "
+    "qualified dotted paths starting with the given import name (e.g. pkg.module.function, or "
+    "pkg.module for a whole module). Use only names that appear in the change text. Use an empty list "
+    "when the change is not about a specific API (e.g. a default value or a Python version)."
+)
+SYMBOLS_SCHEMA = {
+    "type": "object",
+    "properties": {"apis": {"type": "array", "items": {
+        "type": "object",
+        "properties": {"index": {"type": "integer"}, "symbols": {"type": "array", "items": {"type": "string"}}},
+        "required": ["index", "symbols"],
+        "additionalProperties": False,
+    }}},
+    "required": ["apis"],
     "additionalProperties": False,
 }
 
@@ -75,61 +101,141 @@ def _merge(llm_changes: list[dict], pairs: list[dict]) -> list[dict]:
     return llm_changes + [g for g in _guaranteed(pairs) if g["source_url"] not in cited]
 
 
-def _cited_only(allowed: set[str], out: dict) -> dict:
-    """Keep only breaking changes that cite a fetched URL; count what was dropped."""
-    kept = [c for c in out["breaking_changes"]
+def _cited_only(allowed: set[str], changes: list) -> tuple[list[dict], int]:
+    kept = [{"change": str(c["change"]).strip(), "source_url": c["source_url"]} for c in changes
             if isinstance(c, dict) and c.get("source_url") in allowed and str(c.get("change", "")).strip()]
-    return {**out, "breaking_changes": kept, "dropped_uncited": len(out["breaking_changes"]) - len(kept)}
+    return kept, len(changes) - len(kept)
 
 
-def _check(allowed: set[str]):
-    def validate(out: dict) -> dict:
-        if out["breaking_risk"] in ("high", "medium") and not _cited_only(allowed, out)["breaking_changes"]:
-            raise LLMError("InvalidOutput (risk claimed without a cited breaking change)")
-        return out
-    return validate
+def grounded(symbol: str, import_name: str, evidence: str) -> str | None:
+    """Shorten a symbol to its longest prefix whose last part appears in the evidence text."""
+    if not isinstance(symbol, str) or not _DOTTED.match(symbol.strip()):
+        return None
+    parts = symbol.strip().split(".")
+    if parts[0] != import_name:
+        return None
+    while len(parts) >= 2:
+        if re.search(rf"(?<!\w){re.escape(parts[-1])}(?!\w)", evidence):
+            return ".".join(parts)
+        parts.pop()
+    return None
+
+
+def _symbols(changes: list[dict], notes: ReleaseNotes, import_name: str, cache: LLMCache, provider,
+             subject: str) -> tuple[dict[int, list[str]], str]:
+    """{change index: symbols}, plus the LLM status for the record."""
+    by_url: dict[str, str] = {}
+    for i in notes.items:
+        by_url[i.source_url] = by_url.get(i.source_url, "") + " " + i.text
+    candidates = [n for n, c in enumerate(changes)
+                  if c["applicable"] and not c["runtime_drop"] and (c.get("from") or _REMOVAL.search(c["change"]))]
+    evidence = {n: changes[n]["change"] + " " + by_url.get(changes[n]["source_url"], "") for n in candidates}
+    out: dict[int, set[str]] = {n: set() for n in candidates}
+    for n in candidates:                                  # deterministic: ``pkg.module.name`` in the text
+        for s in _BACKTICKED.findall(changes[n]["change"]):
+            if (g := grounded(s, import_name, evidence[n])):
+                out[n].add(g)
+    ask = [n for n in candidates if not out[n]][:20]      # only what the text alone could not name
+    status = "skipped (no applicable removals)" if not candidates else "skipped (all named in the notes)"
+    if ask:
+        user = json.dumps({"import_name": import_name,
+                           "changes": [{"index": n, "text": changes[n]["change"][:300]} for n in ask]})
+        r = ask_json(provider, cache, f"symbols:{subject}", SYMBOLS_SYSTEM, user, SYMBOLS_SCHEMA,
+                     "removed_symbols", claim_fields=())
+        status = r.status if r.status != "unavailable" else f"unavailable ({r.detail})"
+        for api in (r.data or {}).get("apis", []):
+            n = api.get("index") if isinstance(api, dict) else None
+            if n in evidence:
+                for s in api.get("symbols", []):
+                    if (g := grounded(s, import_name, evidence[n])):
+                        out[n].add(g)
+    return {n: sorted(v) for n, v in out.items() if v}, status
+
+
+def _level(changes: list[dict], usages: list[Usage], repo: RepoContext | None) -> tuple[str, str]:
+    applicable = [c for c in changes if c["applicable"]]
+    removals = [c for c in applicable
+                if c["symbols"] or c.get("from") or c["runtime_drop"] or _REMOVAL.search(c["change"])]
+    if usages:
+        groups: dict[str, list[str]] = {}
+        for u in usages:
+            groups.setdefault(u.used_as, []).append(u.where())
+        return "high", "; ".join(f"repo uses {s} at {', '.join(w)} -> likely to break" for s, w in groups.items())
+    if removals:
+        checked = "the repo does not use the affected APIs" if repo else "repo code was not checked (no --repo)"
+        return "medium", f"{len(removals)} applicable removal(s)/rename(s) in the release notes, but {checked}"
+    na = any(not c["applicable"] for c in changes)
+    return "low", "no applicable removals or renames in the release notes" + (
+        f" (runtime drops do not apply: repo uses Python {repo.python_label})" if na and repo else "")
+
+
+def import_name_for(package: str) -> str:
+    return package.lower().replace("-", "_").replace(".", "_")
 
 
 def assess_upgrade_risk(package: str, current: str, target: str, notes: ReleaseNotes, cache: LLMCache,
-                        provider: LLMProvider | None | str = "env") -> dict:
+                        provider: LLMProvider | None | str = "env", repo: RepoContext | None = None,
+                        import_name: str | None = None) -> dict:
     base = {"package": package, "current_version": current, "target_version": target,
-            "notes_repo": notes.repo, "notes_items": len(notes.items), "fetched_urls": notes.fetched_urls}
+            "notes_repo": notes.repo, "notes_items": len(notes.items), "fetched_urls": notes.fetched_urls,
+            "repo_python": repo.python_label if repo else None, "usages": [], "symbols": [],
+            "symbols_status": "", "dropped_uncited": 0}
     if not notes.items:
-        return {**base, "breaking_risk": "unknown", "breaking_changes": [], "dropped_uncited": 0,
-                "reasons": notes.note or "no release notes found", "status": "no_notes", "detail": ""}
-    facts = {
-        "package": package, "current_version": current, "target_version": target,
-        "major_version_change": Version(target).major != Version(current).major,
-        "release_notes": [{"version": i.version, "source_url": i.source_url, "text": i.text} for i in notes.items],
-        "deprecated_then_removed": deprecation_removals(notes.items),
-    }
-    allowed = {i.source_url for i in notes.items}
-    r = ask_json(provider, cache, f"risk:{package}:{current}->{target}", SYSTEM,
-                 json.dumps(facts, sort_keys=True), SCHEMA, "upgrade_risk",
-                 claim_fields=("reasons",), validate=_check(allowed))
-    if not r.available:
-        reason = f"LLM unavailable: {r.detail}" if r.status == "unavailable" else "LLM disabled"
-        return {**base, "breaking_risk": "unknown", "breaking_changes": _guaranteed(facts["deprecated_then_removed"]),
-                "dropped_uncited": 0,
-                "reasons": f"{reason}; {len(notes.items)} relevant release-note items were fetched",
-                "status": r.status, "detail": r.detail}
-    # The citation filter runs here, so cached answers get the same check as fresh ones.
-    data = _cited_only(allowed, {k: r.data[k] for k in SCHEMA["required"]})
-    data["breaking_changes"] = _merge(data["breaking_changes"], facts["deprecated_then_removed"])
-    if facts["deprecated_then_removed"] and data["breaking_risk"] == "low":
-        data["breaking_risk"] = "medium"
-        data["reasons"] += " (raised from low: the release notes show deprecated APIs being removed)"
-    return {**base, **data, "status": r.status, "detail": r.detail}
+        return {**base, "breaking_risk": "unknown", "risk_reason": notes.note or "no release notes found",
+                "breaking_changes": [], "reasons": "", "status": "no_notes", "detail": ""}
+    pairs = deprecation_removals(notes.items)
+    facts = {"package": package, "current_version": current, "target_version": target,
+             "release_notes": [{"version": i.version, "source_url": i.source_url, "text": i.text} for i in notes.items],
+             "deprecated_then_removed": pairs}
+    subject = f"{package}:{current}->{target}"
+    r = ask_json(provider, cache, f"risk:{subject}", SYSTEM, json.dumps(facts, sort_keys=True), SCHEMA,
+                 "upgrade_breaking_changes", claim_fields=("reasons",))
+    llm_changes, dropped = _cited_only({i.source_url for i in notes.items}, (r.data or {}).get("breaking_changes", []))
+    changes = _merge(llm_changes, pairs)
+
+    for c in changes:                                     # applicability: deterministic
+        c["runtime_drop"] = runtime_drop(c["change"])
+        c["applicable"] = drop_applies(c["runtime_drop"], repo)
+        c["not_applicable"] = "" if c["applicable"] else f"not applicable (repo uses Python {repo.python_label})"
+    syms, sym_status = _symbols(changes, notes, import_name or import_name_for(package), cache, provider, subject)
+    for n, c in enumerate(changes):
+        c["symbols"] = syms.get(n, [])
+    all_symbols = sorted({s for c in changes for s in c["symbols"]})
+    usages = find_usages(repo.files, all_symbols) if repo else []
+    for c in changes:
+        c["used"] = any(u.symbol in c["symbols"] for u in usages)
+    level, why = _level(changes, usages, repo)
+    reasons = (r.data or {}).get("reasons", "") if r.available else (
+        f"LLM unavailable: {r.detail}" if r.status == "unavailable" else "LLM disabled")
+    return {**base, "breaking_risk": level, "risk_reason": why, "breaking_changes": changes,
+            "dropped_uncited": dropped, "symbols": all_symbols, "symbols_status": sym_status,
+            "usages": [u.__dict__ for u in usages], "reasons": reasons, "status": r.status, "detail": r.detail}
 
 
-def render_risk(risk: dict) -> list[str]:
-    lines = [f"breaking risk: {risk['breaking_risk']} - {risk['reasons']}"]
-    short = lambda t: t if len(t) <= 180 else t[:177].rstrip() + "..."
-    lines += [f"  - {short(c['change'])} ({c['source_url']})" for c in risk["breaking_changes"] if not c.get("from")]
-    pairs = [c for c in risk["breaking_changes"] if c.get("from")]
-    if pairs:
-        lines.append("  deprecated earlier, removed later (deterministic, from the fetched notes):")
-        lines += [f"  - {short(c['change'].split('): ', 1)[-1])} ({c['source_url']})" for c in pairs]
-    if risk.get("dropped_uncited"):
-        lines.append(f"  ({risk['dropped_uncited']} claimed change(s) dropped: cited no fetched URL)")
+def render_risk(risk: dict, top: int = 3, verbose: bool = False) -> list[str]:
+    short = (lambda t: t) if verbose else (lambda t: t if len(t) <= 160 else t[:157].rstrip() + "...")
+    lines = [f"breaking risk: {risk['breaking_risk']} - {risk['risk_reason']}"]
+    lines += [f"  {u['path']}:{u['line']}  {u['code']}" for u in risk.get("usages", [])]
+    changes = risk["breaking_changes"]
+    applicable = sorted((c for c in changes if c.get("applicable", True)),
+                        key=lambda c: (not c.get("used"), not c.get("symbols"), not c.get("from")))
+    shown = applicable if verbose else applicable[:top]
+    for c in shown:
+        tag = "[used by repo] " if c.get("used") else ""
+        text = c["change"].split("): ", 1)[-1] if c.get("from") else c["change"]
+        lines.append(f"  - {tag}{short(text)} ({c['source_url']})")
+    if len(applicable) > len(shown):
+        lines.append(f"  ... {len(applicable) - len(shown)} more applicable change(s) (--verbose)")
+    na = [c for c in changes if not c.get("applicable", True)]
+    if na:
+        lines.append(f"  {na[0]['not_applicable']}: {len(na)} runtime-drop item(s), not counted")
+        if verbose:
+            lines += [f"    - {short(c['change'])} ({c['source_url']})" for c in na]
+    if verbose:
+        if risk.get("symbols"):
+            lines.append(f"  symbols searched in repo: {', '.join(risk['symbols'])}")
+        if risk.get("reasons"):
+            lines.append(f"  LLM note: {risk['reasons']}")
+        if risk.get("dropped_uncited"):
+            lines.append(f"  ({risk['dropped_uncited']} claimed change(s) dropped: cited no fetched URL)")
     return lines

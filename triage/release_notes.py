@@ -96,9 +96,12 @@ class _Http:
     def __init__(self, session: requests.Session, github_token: str | None):
         self.s, self.token = session, github_token
 
-    def get(self, url: str, **params):
-        headers = {"Accept": "application/vnd.github+json"} if "api.github.com" in url else {}
-        if self.token and "github" in url:
+    def get(self, url: str, raw: bool = False, **params):
+        headers = {"Accept": "application/vnd.github.raw" if raw else "application/vnd.github+json"} \
+            if "api.github.com" in url else {}
+        # Token only for the API (rate limits). Raw file downloads are public, and sending a
+        # fine-grained token for another owner's repo there stalls for ~20-30s.
+        if self.token and url.startswith("https://api.github.com/"):
             headers["Authorization"] = f"Bearer {self.token}"
         return self.s.get(url, params=params or None, headers=headers, timeout=20)
 
@@ -145,11 +148,13 @@ def fetch_release_notes(package: str, current: str, target: str, session: reques
     # 2. Changelog file for versions whose release has no real notes.
     ref = target_tag or "HEAD"
     for name in CHANGELOG_FILES:
-        raw = f"https://raw.githubusercontent.com/{repo}/{ref}/{name}"
-        resp = http.get(raw)
+        # Contents API with the raw media type: same file as raw.githubusercontent.com, but on
+        # api.github.com (raw.githubusercontent.com connects slowly from some networks).
+        url = f"https://api.github.com/repos/{repo}/contents/{name}"
+        resp = http.get(url, raw=True, ref=ref)
         if resp.status_code != 200:
             continue
-        notes.fetched_urls.append(raw)
+        notes.fetched_urls.append(f"{url}?ref={ref}")
         blob = f"https://github.com/{repo}/blob/{ref}/{name}"
         for v, first, lines in changelog_sections(resp.text):
             if in_range(v) and v not in by_version:

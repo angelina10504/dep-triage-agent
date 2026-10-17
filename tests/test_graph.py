@@ -13,6 +13,9 @@ from triage.release_notes import NoteItem, ReleaseNotes
 from triage.store import ActionStore
 
 URL = "https://github.com/o/r/blob/9.9/CHANGES.rst#L10"
+URL_PY = "https://github.com/o/r/blob/9.9/CHANGES.rst#L12"
+APP = "from requests.old import thing\n\nthing()\n"
+CI_YML = "jobs:\n  t:\n    steps:\n      - uses: actions/setup-python@v5\n        with:\n          python-version: \"3.12\"\n"
 ERR = "E   ImportError: cannot import name 'url_quote' from 'werkzeug.urls'"
 LOG = f"collecting\n{ERR}\n##[error]Process completed with exit code 2.\nCleaning up"
 
@@ -26,7 +29,7 @@ class World(FakeGitHub):
     """FakeGitHub + check runs per branch and job logs."""
 
     def __init__(self, ci="failure"):
-        super().__init__({"requirements.txt": REQS})
+        super().__init__({"requirements.txt": REQS, "app.py": APP, ".github/workflows/ci.yml": CI_YML})
         self.ci = ci
 
     def request(self, method, url, params=None, json=None, timeout=None):
@@ -36,6 +39,10 @@ class World(FakeGitHub):
             return Resp(200, {"check_runs": [{
                 "name": "test", "status": "completed", "conclusion": self.ci,
                 "html_url": f"https://github.com/{REPO}/actions/runs/1/job/77"}]})
+        if "/git/trees/" in path:
+            self.calls.append((method, path))
+            ref = path.rsplit("/", 1)[1]
+            return Resp(200, {"tree": [{"path": p, "type": "blob", "size": len(t)} for p, t in self.files[ref].items()]})
         if path.endswith("/actions/jobs/77/logs"):
             self.calls.append((method, path))
             return Text(LOG)
@@ -51,16 +58,19 @@ class FakeLLM:
     def complete_json(self, system, user, schema, schema_name):
         self.calls.append(schema_name)
         return {
-            "upgrade_explanation": {"summary": "s", "upgrade_risk": "r", "reviewer_checklist": "c"},
-            "upgrade_risk": {"breaking_risk": "high", "reasons": "removals",
-                             "breaking_changes": [{"change": "removed url_quote", "source_url": URL}]},
+            "upgrade_explanation": {"summary": "s", "reviewer_checklist": "c"},
+            "upgrade_breaking_changes": {"reasons": "removals", "breaking_changes": [
+                {"change": "Removed the requests.old module.", "source_url": URL},
+                {"change": "Dropped support for Python 3.8.", "source_url": URL_PY}]},
+            "removed_symbols": {"apis": [{"index": 0, "symbols": ["requests.old"]}]},
             "ci_failure_diagnosis": {"root_cause": "url_quote was removed", "evidence_lines": [ERR],
                                      "suggested_next_step": "use urllib.parse.quote"},
         }[schema_name]
 
 
 def notes(name, cur, tgt):
-    return ReleaseNotes("o/r", [NoteItem("9.0", "Remove previously deprecated code.", URL, "changelog")])
+    return ReleaseNotes("o/r", [NoteItem("9.0", "Remove the ``requests.old`` module.", URL, "changelog"),
+                                NoteItem("9.0", "Drop support for Python 3.8.", URL_PY, "changelog")])
 
 
 @pytest.fixture
@@ -111,7 +121,8 @@ def test_approve_one_then_ci_failing_routes_to_diagnosis(env):
     assert "PR failing, NOT fixed" in report and f"evidence: {ERR}" in report
     assert "outcome unchanged: PR failing, NOT fixed" in report
     assert "Jinja2 (attempt 1, triage/jinja2-3.1.6): not approved - nothing done" in report
-    assert "breaking risk: high" in report and URL in report
+    assert "breaking risk: high - repo uses requests.old.thing at app.py:1, app.py:3 -> likely to break" in report
+    assert "not applicable (repo uses Python 3.12)" in report and URL in report
 
 
 def test_passing_ci_skips_diagnosis(env):
@@ -207,3 +218,51 @@ def test_cli_pause_then_resume_by_thread(env, monkeypatch, capsys):
     assert cli.main(["resume", "--thread", "th-9"] + common) == 0
     out = capsys.readouterr().out
     assert [p["head"] for p in gh.pulls] == ["triage/requests-2.32.4"] and "== TRIAGE TABLE" in out
+
+
+
+def test_proposal_shows_risk_before_the_question(env):
+    gh, rt, tmp = env
+    g, cfg = start(rt, tmp / "cp.db")
+    props = {p["package"]: p for p in pending_interrupt(g, cfg)["proposals"]}
+    risk = props["requests"]["risk"]
+    assert risk[0] == "breaking risk: high - repo uses requests.old.thing at app.py:1, app.py:3 -> likely to break"
+    assert risk[1].strip().startswith("app.py:1") and any("[used by repo]" in l for l in risk)
+    assert props["Jinja2"]["risk"][0].startswith("breaking risk: medium")      # symbol not grounded for jinja2
+
+
+def test_explanation_uses_the_computed_risk(env):
+    gh, rt, tmp = env
+    g, cfg = start(rt, tmp / "cp.db")
+    e = g.get_state(cfg).values["explanations"]["PyPI:requests@2.19.0#L1"]
+    assert e["upgrade_risk"].startswith("high - repo uses requests.old.thing")
+
+
+def test_dry_run_reads_the_repo_but_proposes_and_writes_nothing(env):
+    gh, rt, tmp = env
+    g = build_graph(rt, sqlite_checkpointer(str(tmp / "cp.db")))
+    cfg = {"configurable": {"thread_id": "dry"}}
+    g.invoke({"requirements_text": REQS, "repo": REPO, "path": "requirements.txt", "dry_run": True}, cfg)
+    v = g.get_state(cfg).values
+    assert pending_interrupt(g, cfg) is None and gh.writes() == [] and gh.pulls == []
+    assert "dry run: nothing proposed for approval, no PRs opened" in v["report_text"]
+    assert "requests (attempt 1, triage/requests-2.32.4): dry run - would propose a new PR" in v["report_text"]
+    assert v["repo_summary"]["python"] == "3.12" and v["repo_summary"]["py_files"] == 1
+
+
+def test_compact_report_hides_per_advisory_detail(env):
+    gh, rt, tmp = env
+    g, cfg = start(rt, tmp / "cp.db")
+    g.invoke(Command(resume={keys(pending_interrupt(g, cfg))["requests"]: True}), cfg)
+    v = g.get_state(cfg).values
+    assert "Per-advisory decisions" not in v["report_text"] and "Per-advisory decisions" in v["report_verbose"]
+    assert "advisories: GHSA-TEST-REQ" not in v["report_text"] and "advisories: GHSA-TEST-REQ" in v["report_verbose"]
+    for section in ("== PLAN ==", "== UPGRADE RISK", "== ACTIONS ==", "== TRIAGE TABLE"):
+        assert section in v["report_text"]
+
+
+def test_progress_lines():
+    from triage.graph import progress
+    assert progress("collect", {"dependencies": [{}, {}]}) == "2 dependencies"
+    assert progress("assess_upgrade_risk", {"risks": {"a": {"package": "Werkzeug", "breaking_risk": "high"}}}) \
+        == "Werkzeug high"

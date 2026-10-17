@@ -14,8 +14,7 @@ from triage.models import PlanStatus
 from triage.scanner import scan
 
 T = "2026-10-18T00:00:00+00:00"
-GOOD = {"summary": "Werkzeug 2.2.2 has 2 known issues.", "upgrade_risk": "Major jump to 3.x.",
-        "reviewer_checklist": "Check url_quote usage."}
+GOOD = {"summary": "Werkzeug 2.2.2 has 2 known issues.", "reviewer_checklist": "Check url_quote usage."}
 
 
 class Resp:
@@ -83,7 +82,8 @@ def test_request_uses_strict_json_schema(cache):
 def test_facts_are_deterministic_and_complete():
     r = werkzeug_scan()
     f = facts(r.plans[0], r.matches)
-    assert (f["current_version"], f["target_version"], f["major_version_change"]) == ("2.2.2", "3.0.6", True)
+    assert (f["current_version"], f["target_version"]) == ("2.2.2", "3.0.6")
+    assert "major_version_change" not in f and f["upgrade_risk"].startswith("not assessed")
     assert f["unique_vulnerabilities"] == 2 and [a["id"] for a in f["advisories"]] == ["GHSA-1", "GHSA-2", "PYSEC-1"]
 
 
@@ -120,8 +120,7 @@ def test_auth_error_is_not_retried(cache):
     assert explain(r.plans[0], r.matches, cache, p).detail == "HTTP 401" and len(s.payloads) == 1
 
 
-@pytest.mark.parametrize("content", ["not json", {"summary": "x"}, {"summary": "", "upgrade_risk": "a",
-                                                                     "reviewer_checklist": "b"}])
+@pytest.mark.parametrize("content", ["not json", {"summary": "x"}, {"summary": "", "reviewer_checklist": "b"}])
 def test_bad_output_is_unavailable(cache, content):
     p, _ = provider(ok(content))
     r = werkzeug_scan()
@@ -218,8 +217,8 @@ def test_deterministic_modules_do_not_import_the_llm():
 def test_pr_body_gets_labelled_explanation_or_unavailable_note():
     from triage.explain import Explanation
     from triage.explain import with_explanation
-    good = with_explanation("BODY", Explanation("ok", **GOOD, detail="groq/m"))
-    assert "### Explanation (LLM, advisory only)" in good and GOOD["upgrade_risk"] in good
+    good = with_explanation("BODY", Explanation("ok", **GOOD, upgrade_risk="high - repo uses x", detail="groq/m"))
+    assert "### Explanation (LLM, advisory only)" in good and "Upgrade risk: high - repo uses x" in good
     bad = with_explanation("BODY", Explanation("unavailable", detail="HTTP 429"))
     assert bad.endswith("LLM explanation unavailable (HTTP 429).")
 
@@ -238,7 +237,7 @@ def test_banned_wording_retried_once_then_accepted(cache, word):
 
 
 def test_banned_wording_twice_is_unavailable_and_not_cached(cache):
-    bad = {**GOOD, "upgrade_risk": "Everything is fixed."}
+    bad = {**GOOD, "reviewer_checklist": "Everything is fixed."}
     p, s = provider(ok(bad))
     r = werkzeug_scan()
     e = explain(r.plans[0], r.matches, cache, p)
@@ -288,3 +287,45 @@ def test_cached_answer_failing_newer_rules_is_a_miss(cache):
     again = ask_json(p, cache, "x", "sys", "user", SCHEMA, "n", claim_fields=("summary",), validate=newer_rule)
     assert again.status == "ok" and again.data["summary"] == GOOD["summary"] and len(s.payloads) == 2
     assert ("x", "cache_rejected", "InvalidOutput (new rule)") in cache.events()
+
+
+def test_explanation_risk_comes_from_assess_upgrade_risk_not_the_llm(cache):
+    risk = {"breaking_risk": "high", "risk_reason": "repo uses werkzeug.urls.url_quote at app.py:10 -> likely to break"}
+    p, s = provider(ok({**GOOD, "upgrade_risk": "low, nothing to worry about"}))   # extra LLM opinion ignored
+    r = werkzeug_scan()
+    e = explain(r.plans[0], r.matches, cache, p, risk=risk)
+    assert e.upgrade_risk == "high - repo uses werkzeug.urls.url_quote at app.py:10 -> likely to break"
+    assert "low, nothing" not in e.render()
+    assert "upgrade_risk" not in s.payloads[0]["response_format"]["json_schema"]["schema"]["properties"]
+    assert '"upgrade_risk": "high - repo uses' in s.payloads[0]["messages"][1]["content"]
+
+
+# ---------- per-node time budget ----------
+
+def test_budget_stops_waiting_out_rate_limits(cache):
+    from triage.llm import llm_budget
+    sleeps = []
+    p, s = provider(Resp(429, {}, {"retry-after": "25"}), ok(GOOD), sleeps=sleeps)
+    r = werkzeug_scan()
+    with llm_budget(10):
+        e = explain(r.plans[0], r.matches, cache, p)
+    assert e.status == "unavailable" and e.detail == "time budget exceeded (after HTTP 429)"
+    assert sleeps == [] and len(s.payloads) == 1               # gave up instead of sleeping 25s
+
+
+def test_budget_already_spent_makes_no_call(cache):
+    from triage.llm import llm_budget
+    p, s = provider(ok(GOOD))
+    r = werkzeug_scan()
+    with llm_budget(0.5):
+        assert explain(r.plans[0], r.matches, cache, p).detail == "time budget exceeded"
+    assert s.payloads == []
+
+
+def test_no_budget_outside_the_block(cache):
+    from triage.llm import llm_budget
+    with llm_budget(0.5):
+        pass
+    p, _ = provider(ok(GOOD))
+    r = werkzeug_scan()
+    assert explain(r.plans[0], r.matches, cache, p).status == "ok"
