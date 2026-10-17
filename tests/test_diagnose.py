@@ -122,3 +122,53 @@ def test_next_step_reusing_the_failed_module_is_rejected(cache, step):
     llm = FakeLLM({**good(), "suggested_next_step": step}, good())
     d = run(cache, llm)
     assert llm.calls == 2 and d["suggested_next_step"].startswith("Use urllib.parse.quote")
+
+
+# ---------- never stay on / go back to a vulnerable version ----------
+
+from triage.diagnose import backwards_step  # noqa: E402
+
+
+@pytest.mark.parametrize("step", [
+    "Pin Werkzeug to a 2.x version that still provides url_quote.",
+    "Downgrade Werkzeug until the code is updated.",
+    "Stay on the current version for now.",
+    "Pin werkzeug<3 in requirements.txt.",
+    "Set Werkzeug==2.3.8 and re-run CI.",
+    "Use Werkzeug 3.0.x, which is closer to the old API.",
+    "Revert the upgrade PR.",
+    "Pin a compatible version of Werkzeug.",
+])
+def test_steps_that_keep_a_vulnerable_version_are_rejected(step):
+    assert backwards_step(step, "3.1.9") is not None
+
+
+@pytest.mark.parametrize("step", [
+    "Replace werkzeug.urls.url_quote with urllib.parse.quote in app.py, keep Werkzeug 3.1.9 and re-run CI.",
+    "Use urllib.parse.quote on Python 3.12 and re-run CI.",
+    "Allow werkzeug<4 and change the import to urllib.parse.quote.",
+    "See issue #2768 and line 223 of the log.",
+])
+def test_code_fixes_on_the_target_version_are_allowed(step):
+    assert backwards_step(step, "3.1.9") is None
+
+
+def test_pin_suggestion_is_retried_and_the_code_fix_kept(cache):
+    pin = {**good(), "suggested_next_step": "Pin Werkzeug to a 2.x version that still provides url_quote."}
+    fix = {**good(), "suggested_next_step": "Replace werkzeug.urls.url_quote with urllib.parse.quote in app.py, "
+                                            "keep Werkzeug 3.1.9 and re-run CI."}
+    llm = FakeLLM(pin, fix)
+    d = run(cache, llm)
+    assert llm.calls == 2 and d["status"] == "ok" and "urllib.parse.quote" in d["suggested_next_step"]
+
+
+def test_pin_suggestion_twice_is_unavailable_with_log_evidence(cache):
+    pin = {**good(), "suggested_next_step": "Downgrade to Werkzeug 2.2.2."}
+    d = run(cache, FakeLLM(pin))
+    assert d["status"] == "unavailable" and "keeps a vulnerable version" in d["root_cause"]
+    assert d["suggested_next_step"] == "" and d["evidence_lines"] == [ERR]
+
+
+def test_prompt_no_longer_suggests_pinning(cache):
+    from triage.diagnose import SYSTEM
+    assert "pin a compatible version" not in SYSTEM and "never suggest staying on it" in SYSTEM

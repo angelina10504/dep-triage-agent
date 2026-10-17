@@ -3,19 +3,19 @@ requests -> 2.33.0  4 vulns (8 records)    https://github.com/angelina10504/dep-
 Werkzeug -> 3.1.9   10 vulns (20 records)  https://github.com/angelina10504/dep-triage-demo/pull/2  open      failing  PR failing, NOT fixed
 
 Evidence:
-  requests PR #1 @ 2c1e5e3 (observed 2026-10-17T22:38:17+00:00; intended: CI passing, observed: passing)
+  requests PR #1 @ 2c1e5e3 (observed 2026-10-17T22:43:03+00:00; intended: CI passing, observed: passing)
     advisories: GHSA-9hjg-9r4m-mvj7, GHSA-9wx4-h78v-vm56, GHSA-gc5v-m9x4-r6x2, GHSA-j8r2-6x86-q33q, PYSEC-2023-74, PYSEC-2026-1872, PYSEC-2026-1873, PYSEC-2026-2275
     [success] check_run GitGuardian Security Checks: https://github.com/angelina10504/dep-triage-demo/runs/117452474256
     [success] check_run test: https://github.com/angelina10504/dep-triage-demo/actions/runs/39052055910/job/117452463009
     merged_at 2026-10-17T17:12:25Z; no deployment was observed
-  Werkzeug PR #2 @ 13c9ca3 (observed 2026-10-17T22:38:19+00:00; intended: CI passing, observed: failing)
+  Werkzeug PR #2 @ 13c9ca3 (observed 2026-10-17T22:43:05+00:00; intended: CI passing, observed: failing)
     advisories: GHSA-29vq-49wr-vm6x, GHSA-2g68-c3qc-8985, GHSA-87hc-h4r5-73f7, GHSA-f9vj-2wh5-fj8j, GHSA-g6x2-hccm-hh4m, GHSA-hgf8-39gv-g3f2, GHSA-hrfv-mqp8-q5rw, GHSA-px8h-6qxv-m22q, GHSA-q34m-jh98-gwm2, GHSA-xg9f-g7g7-2323, PYSEC-2023-221, PYSEC-2023-57, PYSEC-2023-58, PYSEC-2026-2043, PYSEC-2026-2044, PYSEC-2026-2045, PYSEC-2026-2046, PYSEC-2026-2320, PYSEC-2026-3417, PYSEC-2026-4312
     [success] check_run GitGuardian Security Checks: https://github.com/angelina10504/dep-triage-demo/runs/117452503764
     [failure] check_run test: https://github.com/angelina10504/dep-triage-demo/actions/runs/39052065487/job/117452490910
-    diagnosis (cached): ImportError: 'url_quote' was removed from werkzeug.urls in Werkzeug 3.x, causing the import in app.py to fail.
-      evidence: app.py:6: in <module>
+    diagnosis (ok): ImportError: 'url_quote' was removed from werkzeug.urls in Werkzeug 3.1.9, causing the import in app.py to fail.
       evidence: from werkzeug.urls import url_quote
       evidence: E   ImportError: cannot import name 'url_quote' from 'werkzeug.urls' (/opt/hostedtoolcache/Python/3.12.15/x64/lib/python3.12/site-packages/werkzeug/urls.py)
-      next step: Pin Werkzeug to a 2.x version that still provides url_quote, or replace the usage with urllib.parse.quote from the standard library.
+      evidence: test_app.py:1: in <module>
+      next step: In app.py replace the removed import with a standard library equivalent, e.g., `from urllib.parse import quote as url_quote` and adjust any calls accordingly.
       log: https://github.com/angelina10504/dep-triage-demo/actions/runs/39052065487/job/117452490910 (lines 183-223)
       outcome unchanged: PR failing, NOT fixed

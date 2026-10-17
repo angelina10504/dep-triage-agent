@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import re
 
+from packaging.version import InvalidVersion, Version
+
 from .github_pr import GitHubClient, GitHubError
 from .llm import LLMCache, LLMError, LLMProvider, ask_json
 
@@ -25,10 +27,11 @@ SYSTEM = (
     "You diagnose why a CI job failed after a dependency upgrade. You get the package, the version "
     "change and an excerpt of the failed job log. root_cause: one or two sentences naming the error "
     "and the code it comes from. evidence_lines: copy 1-4 lines EXACTLY as they appear in the log "
-    "excerpt (without the line numbers). suggested_next_step: one concrete action for a developer "
-    "(for example: change the import, pin a compatible version, or update the code). If an import from "
-    "a module failed because a name was removed, do not suggest other names from that same module; "
-    "prefer the standard library or pinning a compatible version. Plain English, no markdown."
+    "excerpt (without the line numbers). suggested_next_step: one concrete CODE change that makes the "
+    "project work on the target version, then re-run CI (for example: replace a removed function with "
+    "its standard-library equivalent). The old version is vulnerable: never suggest staying on it, "
+    "downgrading, or pinning to any version below the target. If an import from a module failed because "
+    "a name was removed, do not suggest other names from that same module. Plain English, no markdown."
 )
 SCHEMA = {
     "type": "object",
@@ -68,7 +71,44 @@ def _norm(line: str) -> str:
     return " ".join(re.sub(r"^\s*\d+:\s", "", line).split())
 
 
-def _in_window(window_text: str):
+_BACKWARDS = re.compile(r"\b(downgrad\w*|revert\w*|roll(?:ing|ed)?\s+back|stay(?:ing)?\s+on|"
+                        r"remain(?:ing)?\s+on|keep(?:ing)?\s+(?:the\s+)?(?:current|old|existing)\s+version|"
+                        r"(?:older|previous|earlier|lower|compatible)\s+version)\b", re.IGNORECASE)
+_DOTTED = re.compile(r"(?<![\w.])(\d+(?:\.(?:\d+|x|\*))+)(?![\w.]*\w)")
+_PIN = re.compile(r"(<=?|==|~=)\s*(\d+(?:\.\d+)*)")
+
+
+def _below(token: str, target: Version) -> bool:
+    """True if a version or wildcard like '2.x' / '3.0.*' lies entirely below the target."""
+    parts = token.split(".")
+    if parts[-1] in ("x", "*"):
+        prefix = tuple(int(p) for p in parts[:-1])
+        return prefix < target.release[:len(prefix)]
+    try:
+        return Version(token) < target
+    except InvalidVersion:
+        return False
+
+
+def backwards_step(step: str, target: str) -> str | None:
+    """Why a suggested next step would leave the project on a vulnerable version, else None.
+
+    The target is the lowest version outside every matched advisory's affected range
+    (deterministic plan), so anything below it may still be inside a range.
+    """
+    t = Version(target)
+    if m := _BACKWARDS.search(step):
+        return f"suggests '{m.group(0)}'"
+    for op, v in _PIN.findall(step):
+        if (op == "<" and Version(v) <= t) or (op != "<" and Version(v) < t):
+            return f"pins '{op}{v}' below the target {target}"
+    for v in _DOTTED.findall(step):
+        if _below(v, t):
+            return f"mentions version {v}, below the target {target}"
+    return None
+
+
+def _in_window(window_text: str, target: str):
     lines = [(_norm(l), l.strip()) for l in window_text.splitlines()]
     failed = set(re.findall(r"cannot import name '(\w+)' from '([\w.]+)'", window_text))
 
@@ -82,6 +122,8 @@ def _in_window(window_text: str):
         if not kept:
             raise LLMError("InvalidOutput (evidence lines not found in the log)")
         step = out.get("suggested_next_step", "")
+        if why := backwards_step(step, target):
+            raise LLMError(f"InvalidOutput (next step keeps a vulnerable version: {why})")
         for name, module in failed:
             m = re.escape(module)
             sibling = any(n != name for n in re.findall(rf"\b{m}\.(\w+)", step))
@@ -112,13 +154,13 @@ def diagnose_failure(repo: str, pr_number: int, package: str, current: str, targ
              "log_excerpt": "\n".join(f"{n}: {t}" for n, t in window)}
     r = ask_json(provider, cache, f"diagnose:{repo}#{pr_number}:{job_id}", SYSTEM,
                  json.dumps(facts, sort_keys=True), SCHEMA, "ci_failure_diagnosis",
-                 claim_fields=("root_cause", "suggested_next_step"), validate=_in_window(text))
+                 claim_fields=("root_cause", "suggested_next_step"), validate=_in_window(text, target))
     common = {**base, "job_url": url, "error_lines": error_lines,
               "log_window": f"lines {window[0][0]}-{window[-1][0]}" if window else ""}
     data = None
     if r.available:
         try:     # same checks for cached answers as for fresh ones (rules may be newer than the cache)
-            data = _in_window(text)({k: r.data[k] for k in SCHEMA["required"]})
+            data = _in_window(text, target)({k: r.data[k] for k in SCHEMA["required"]})
         except LLMError as e:
             r = type(r)("unavailable", None, e.reason)
     if data is None:
