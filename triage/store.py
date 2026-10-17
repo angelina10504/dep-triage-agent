@@ -1,8 +1,10 @@
 """Durable record of human-approved actions, so a retry never runs an action twice.
 
-One row per (dependency_id, target_version). The row is written the moment a
-human approves, and updated once the PR exists. A later run that finds a row with
-a PR URL reports that PR instead of calling GitHub again.
+One row per (dependency_id, target_version, attempt). The row is written the
+moment a human approves, and updated once the PR exists. A later run that finds a
+row with a PR URL reports that PR instead of calling GitHub again. A new attempt
+(attempt + 1) is only started when the earlier PR was merged/closed but the file
+on the base branch still pins the vulnerable version (e.g. after a demo reset).
 
 ci_observations is append-only history from the CI watcher: every look at a PR
 adds a row (intended vs observed state), nothing is overwritten.
@@ -18,6 +20,7 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS actions (
     dependency_id  TEXT NOT NULL,
     target_version TEXT NOT NULL,
+    attempt        INTEGER NOT NULL DEFAULT 1,
     repo           TEXT NOT NULL,
     branch         TEXT NOT NULL,
     status         TEXT NOT NULL,      -- approved | pr_opened
@@ -28,7 +31,7 @@ CREATE TABLE IF NOT EXISTS actions (
     updated_at     TEXT NOT NULL,
     package        TEXT,
     advisories     TEXT,               -- JSON [{"id": ..., "aliases": [...]}]
-    PRIMARY KEY (dependency_id, target_version)
+    PRIMARY KEY (dependency_id, target_version, attempt)
 );
 CREATE TABLE IF NOT EXISTS ci_observations (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,6 +51,8 @@ CREATE TABLE IF NOT EXISTS ci_observations (
 """
 # Columns added after the first release of the actions table.
 _MIGRATIONS = {"package": "TEXT", "advisories": "TEXT"}
+_ACTION_COLS = ("dependency_id, target_version, repo, branch, status, approved_by, approved_at,"
+                " pr_number, pr_url, updated_at, package, advisories")
 
 
 def _now() -> str:
@@ -66,6 +71,7 @@ class ActionRecord:
     pr_number: int | None
     pr_url: str | None
     updated_at: str
+    attempt: int = 1
     package: str | None = None
     advisories: list[dict] = field(default_factory=list)
 
@@ -85,13 +91,20 @@ class ActionStore:
         for col, typ in _MIGRATIONS.items():
             if col not in have:
                 self.db.execute(f"ALTER TABLE actions ADD COLUMN {col} {typ}")
+        if "attempt" not in have:   # old key (dependency_id, target_version): rebuild with attempt = 1
+            self.db.executescript(
+                "ALTER TABLE actions RENAME TO actions_old;" + _SCHEMA.split(";")[0] + ";"
+                f"INSERT INTO actions ({_ACTION_COLS}, attempt) SELECT {_ACTION_COLS}, 1 FROM actions_old;"
+                "DROP TABLE actions_old;")
         self.db.commit()
 
-    def get(self, dependency_id: str, target_version: str) -> ActionRecord | None:
-        row = self.db.execute(
-            "SELECT * FROM actions WHERE dependency_id = ? AND target_version = ?",
-            (dependency_id, target_version),
-        ).fetchone()
+    def get(self, dependency_id: str, target_version: str, attempt: int | None = None) -> ActionRecord | None:
+        """One attempt, or the latest attempt when attempt is None."""
+        q = "SELECT * FROM actions WHERE dependency_id = ? AND target_version = ?"
+        args: tuple = (dependency_id, target_version)
+        if attempt is not None:
+            q, args = q + " AND attempt = ?", args + (attempt,)
+        row = self.db.execute(q + " ORDER BY attempt DESC LIMIT 1", args).fetchone()
         return _record(row) if row else None
 
     def with_prs(self, repo: str | None = None) -> list[ActionRecord]:
@@ -102,20 +115,20 @@ class ActionStore:
 
     def record_approval(self, dependency_id: str, target_version: str, repo: str,
                         branch: str, approved_by: str, package: str | None = None,
-                        advisories: list[dict] | None = None) -> ActionRecord:
+                        advisories: list[dict] | None = None, attempt: int = 1) -> ActionRecord:
         """Insert the approval once; an existing row (earlier approval) is kept as is."""
         now = _now()
         self.db.execute(
-            "INSERT OR IGNORE INTO actions (dependency_id, target_version, repo, branch, status,"
+            "INSERT OR IGNORE INTO actions (dependency_id, target_version, attempt, repo, branch, status,"
             " approved_by, approved_at, updated_at, package, advisories)"
-            " VALUES (?, ?, ?, ?, 'approved', ?, ?, ?, ?, ?)",
-            (dependency_id, target_version, repo, branch, approved_by, now, now, package,
+            " VALUES (?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?, ?)",
+            (dependency_id, target_version, attempt, repo, branch, approved_by, now, now, package,
              json.dumps(advisories) if advisories else None),
         )
         self.db.commit()
         if advisories:
             self.fill_advisories(dependency_id, target_version, package, advisories)
-        return self.get(dependency_id, target_version)
+        return self.get(dependency_id, target_version, attempt)
 
     def fill_advisories(self, dependency_id: str, target_version: str, package: str | None,
                         advisories: list[dict]) -> None:
@@ -127,14 +140,15 @@ class ActionStore:
         )
         self.db.commit()
 
-    def record_pr(self, dependency_id: str, target_version: str, pr_number: int, pr_url: str) -> ActionRecord:
+    def record_pr(self, dependency_id: str, target_version: str, pr_number: int, pr_url: str,
+                  attempt: int = 1) -> ActionRecord:
         self.db.execute(
             "UPDATE actions SET status = 'pr_opened', pr_number = ?, pr_url = ?, updated_at = ?"
-            " WHERE dependency_id = ? AND target_version = ?",
-            (pr_number, pr_url, _now(), dependency_id, target_version),
+            " WHERE dependency_id = ? AND target_version = ? AND attempt = ?",
+            (pr_number, pr_url, _now(), dependency_id, target_version, attempt),
         )
         self.db.commit()
-        return self.get(dependency_id, target_version)
+        return self.get(dependency_id, target_version, attempt)
 
     def add_observation(self, *, dependency_id: str, target_version: str, repo: str, pr_number: int,
                         pr_state: str, merged_at: str | None, head_sha: str, ci_status: str,

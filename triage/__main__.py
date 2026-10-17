@@ -27,7 +27,7 @@ def _load_dotenv(path: str = ".env") -> None:
 
 
 def _open_prs(args, result) -> int:
-    from .github_pr import GitHubClient, ask_approval, build_proposal, open_pr
+    from .github_pr import GitHubClient, ask_approval, build_proposal, open_pr, resolve
     from .store import ActionStore
 
     upgrades = [p for p in result.plans if p.status == PlanStatus.UPGRADE]
@@ -46,11 +46,18 @@ def _open_prs(args, result) -> int:
 
     for plan in upgrades:
         p = build_proposal(plan, deps[plan.dependency_id], result.matches, args.repo, base, args.path)
-        done = store.get(p.dependency_id, p.target_version)
-        if done and done.pr_url:
-            store.fill_advisories(p.dependency_id, p.target_version, p.package, p.advisories)
-            print(f"\n{p.package}: already handled, PR {done.pr_url} (approved {done.approved_at})")
+        store.fill_advisories(p.dependency_id, p.target_version, p.package, p.advisories)
+        res = resolve(p, client, store)
+        if res.action == "reuse":
+            print(f"\n{p.package}: already handled, {res.reason}: {res.pr['html_url']} (not opening another)")
             continue
+        if res.action == "no_action":
+            print(f"\n{p.package}: no action - {res.reason}")
+            continue
+        p = res.proposal
+        if p.attempt > 1:
+            print(f"\n{p.package}: previous PR #{res.pr['number']} was merged/closed but {p.path} on "
+                  f"{p.base} still pins {p.old_line!r} -> new action, attempt {p.attempt}")
         if not ask_approval(p):
             print(f"{p.package}: not approved, nothing done.")
             continue

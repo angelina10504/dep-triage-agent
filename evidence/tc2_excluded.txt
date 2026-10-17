@@ -1,0 +1,58 @@
+
+PACKAGE       CURRENT   TARGET    STATUS     REASON
+requests      2.33.0    -         no_action  no advisory affects the installed version
+Werkzeug      2.2.2     3.1.9     upgrade    upgrade to 3.1.9 fixes 10 vulnerabilities (20 advisory records)
+MarkupSafe    2.1.5     -         no_action  no advisory affects the installed version
+Markdown      3.11.1    -         no_action  no advisory affects the installed version
+
+Per-advisory decisions (PyPI):
+  [not_affected] PyPI:requests@2.33.0#L1      GHSA-652x-xj99-gmcc    2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      GHSA-9hjg-9r4m-mvj7    2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      GHSA-9wx4-h78v-vm56    2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      GHSA-cfj3-7x9c-4p3h    2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      GHSA-gc5v-m9x4-r6x2    2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      GHSA-j8r2-6x86-q33q    2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      GHSA-pg2w-x9wp-vw92    2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      GHSA-x84v-xcm2-53pg    2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      PYSEC-2014-13          2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      PYSEC-2014-14          2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      PYSEC-2015-17          2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      PYSEC-2018-28          2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      PYSEC-2023-74          2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      PYSEC-2026-1872        2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      PYSEC-2026-1873        2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      PYSEC-2026-2275        2.33.0 is outside every affected range
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       GHSA-29vq-49wr-vm6x    2.2.2 is inside affected range >=0, <3.1.6
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       GHSA-2g68-c3qc-8985    2.2.2 is inside affected range >=0, <3.0.3
+  [not_affected] PyPI:werkzeug@2.2.2#L2       GHSA-3p3h-qghp-hvh2    2.2.2 is outside every affected range
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       GHSA-87hc-h4r5-73f7    2.2.2 is inside affected range >=0, <3.1.5
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       GHSA-f9vj-2wh5-fj8j    2.2.2 is inside affected range >=0, <3.0.6
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       GHSA-g6x2-hccm-hh4m    2.2.2 is inside affected range >=0, <3.1.9
+  [not_affected] PyPI:werkzeug@2.2.2#L2       GHSA-gq9m-qvpx-68hc    2.2.2 is outside every affected range
+  [not_affected] PyPI:werkzeug@2.2.2#L2       GHSA-h2fp-xgx6-xh6f    2.2.2 is outside every affected range
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       GHSA-hgf8-39gv-g3f2    2.2.2 is inside affected range >=0, <3.1.4
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       GHSA-hrfv-mqp8-q5rw    2.2.2 is inside affected range >=2.0.0rc1, <2.3.8
+  [not_affected] PyPI:werkzeug@2.2.2#L2       GHSA-j544-7q9p-6xp8    2.2.2 is outside every affected range
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       GHSA-px8h-6qxv-m22q    2.2.2 is inside affected range >=0, <2.2.3
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       GHSA-q34m-jh98-gwm2    2.2.2 is inside affected range >=2.0.0rc1, <3.0.6
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       GHSA-xg9f-g7g7-2323    2.2.2 is inside affected range >=0, <2.2.3
+  [not_affected] PyPI:werkzeug@2.2.2#L2       PYSEC-2017-43          2.2.2 is outside every affected range
+  [not_affected] PyPI:werkzeug@2.2.2#L2       PYSEC-2019-140         2.2.2 is outside every affected range
+  [not_affected] PyPI:werkzeug@2.2.2#L2       PYSEC-2020-157         2.2.2 is outside every affected range
+  [not_affected] PyPI:werkzeug@2.2.2#L2       PYSEC-2022-203         2.2.2 is outside every affected range
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       PYSEC-2023-221         2.2.2 is inside affected range >=0, <2.3.8
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       PYSEC-2023-57          2.2.2 is inside affected range >=0, <2.2.3
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       PYSEC-2023-58          2.2.2 is inside affected range >=0, <2.2.3
+  [not_affected] PyPI:werkzeug@2.2.2#L2       PYSEC-2026-1065        2.2.2 is outside every affected range
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       PYSEC-2026-2043        2.2.2 is inside affected range >=0, <3.0.3
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       PYSEC-2026-2044        2.2.2 is inside affected range >=0, <3.1.5
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       PYSEC-2026-2045        2.2.2 is inside affected range >=0, <3.0.6
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       PYSEC-2026-2046        2.2.2 is inside affected range >=0, <3.1.4
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       PYSEC-2026-2320        2.2.2 is inside affected range >=0, <3.1.6
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       PYSEC-2026-3417        2.2.2 is inside affected range >=2.0.0rc1, <3.0.6
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       PYSEC-2026-4312        2.2.2 is inside affected range >=0, <3.1.9
+  [not_affected] PyPI:markdown@3.11.1#L4      GHSA-5wmx-573v-2qwq    3.11.1 is outside every affected range
+  [not_affected] PyPI:markdown@3.11.1#L4      PYSEC-2026-89          3.11.1 is outside every affected range
+
+Same name in other ecosystems (TC2 - not this package, never upgraded):
+  PyPI:markdown@3.11.1#L4      GHSA-wx77-rp39-c6vg    excluded: advisory is for npm/markdown, dependency is PyPI/markdown

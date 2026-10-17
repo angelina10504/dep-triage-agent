@@ -2,8 +2,14 @@
 
 Flow for one UPGRADE plan:
   build_proposal()  pure: the exact one-line change, branch name and PR text
+  resolve()         reuse an open PR / no action if base is already fixed / pick a new attempt
   ask_approval()    human gate: only "y"/"yes" approves, anything else is a no
   open_pr()         idempotent: store -> existing PR -> existing branch -> create
+
+Re-runs: an OPEN PR for the branch is always reused. If the earlier PR was merged or
+closed but the file on the base branch still pins the vulnerable version (e.g. after
+scripts/reset_demo.sh), that is a new action: attempt n+1 on triage/<pkg>-<target>-<n+1>,
+again behind the y/N approval.
 
 Opening a PR is the irreversible step, so open_pr() checks three places before it
 creates anything: the local SQLite store, GitHub's PR list for the head branch, and
@@ -14,7 +20,7 @@ from __future__ import annotations
 import base64
 import getpass
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable
 
 import requests
@@ -50,12 +56,13 @@ class Proposal:
     body: str
     advisory_ids: list[str] = field(default_factory=list)
     advisories: list[dict] = field(default_factory=list)   # [{"id", "aliases"}] for unique counting
+    attempt: int = 1
 
     def render(self) -> str:
         return (
             f"Repo:    {self.repo}\n"
             f"Base:    {self.base}\n"
-            f"Branch:  {self.branch}\n"
+            f"Branch:  {self.branch}" + (f"  (attempt {self.attempt})" if self.attempt > 1 else "") + "\n"
             f"File:    {self.path} line {self.line}\n"
             f"  - {self.old_line}\n"
             f"  + {self.new_line}\n"
@@ -71,8 +78,9 @@ class PrResult:
     pr_url: str | None = None
 
 
-def branch_name(package: str, target: str) -> str:
-    return f"triage/{re.sub(r'[^a-z0-9._-]+', '-', package.lower())}-{target}"
+def branch_name(package: str, target: str, attempt: int = 1) -> str:
+    base = f"triage/{re.sub(r'[^a-z0-9._-]+', '-', package.lower())}-{target}"
+    return base if attempt == 1 else f"{base}-{attempt}"
 
 
 def bump_line(line: str, current: str, target: str) -> str:
@@ -136,11 +144,62 @@ def build_proposal(plan: UpgradePlan, dep: Dependency, matches: list[AdvisoryMat
     )
 
 
-def ask_approval(proposal: Proposal, input_fn: Callable[[str], str] = input,
+@dataclass
+class Resolution:
+    action: str              # new | reuse | no_action
+    proposal: Proposal       # for "new": the attempt and branch to use
+    reason: str
+    pr: dict | None = None   # the open PR (reuse) or the earlier merged/closed PR
+
+
+def _pr_state(pr: dict) -> str:
+    return "merged" if pr.get("merged") or pr.get("merged_at") else pr["state"]
+
+
+def with_attempt(p: Proposal, n: int, previous: dict | None = None) -> Proposal:
+    if n == 1:
+        return p
+    name = p.dependency_id.split(":", 1)[1].split("@", 1)[0]
+    note = (f"\n\nRe-run (attempt {n}): previous PR #{previous['number']} was {_pr_state(previous)}, "
+            f"but `{p.path}` on `{p.base}` still pins `{p.old_line}`.") if previous else ""
+    return replace(p, attempt=n, branch=branch_name(name, p.target_version, n), body=p.body + note)
+
+
+def resolve(p: Proposal, client: GitHubClient, store: ActionStore, max_attempts: int = 20) -> Resolution:
+    """Decide what an approved run WOULD do, before asking for approval. Read-only on GitHub."""
+    base_line: str | None = None
+    previous: dict | None = None
+    for n in range(1, max_attempts + 1):
+        q = with_attempt(p, n, previous)
+        rec = store.get(p.dependency_id, p.target_version, n)
+        pr = (client.get(f"/repos/{p.repo}/pulls/{rec.pr_number}") if rec and rec.pr_number
+              else client.find_pr(p.repo, q.branch))
+        if pr is None:
+            return Resolution("new", q, f"attempt {n}: no PR yet for {q.branch}", previous)
+        state = _pr_state(pr)
+        if state == "open":
+            if not (rec and rec.pr_url):     # found on GitHub only: remember it
+                store.record_approval(p.dependency_id, p.target_version, p.repo, q.branch,
+                                      "(existing PR on GitHub)", p.package, p.advisories, n)
+                store.record_pr(p.dependency_id, p.target_version, pr["number"], pr["html_url"], n)
+            return Resolution("reuse", q, f"PR #{pr['number']} is still open", pr)
+        if base_line is None:
+            text, _ = client.get_file(p.repo, p.path, p.base)
+            lines = text.splitlines()
+            base_line = lines[p.line - 1].strip() if p.line <= len(lines) else ""
+        if base_line != p.old_line.strip():
+            return Resolution("no_action", q,
+                              f"PR #{pr['number']} was {state}; {p.path} line {p.line} on {p.base} is now "
+                              f"{base_line!r}, no longer {p.old_line!r}", pr)
+        previous = pr                        # merged/closed, base still vulnerable -> next attempt
+    raise GitHubError(f"more than {max_attempts} attempts for {p.dependency_id}")
+
+
+def ask_approval(proposal: Proposal, input_fn: Callable[[str], str] | None = None,
                  print_fn: Callable[[str], None] = print) -> bool:
     print_fn("\n--- Proposed upgrade PR ---\n" + proposal.render())
     try:
-        answer = input_fn("Open this PR? [y/N] ")
+        answer = (input_fn or input)("Open this PR? [y/N] ")
     except EOFError:            # no terminal (e.g. piped input) -> never approve by default
         return False
     return answer.strip().lower() in {"y", "yes"}
@@ -219,17 +278,17 @@ def _replace_line(text: str, line_no: int, old: str, new: str) -> str:
 def open_pr(p: Proposal, client: GitHubClient, store: ActionStore,
             approved_by: str | None = None) -> PrResult:
     """Run an APPROVED proposal. Safe to call again after a crash or retry."""
-    done = store.get(p.dependency_id, p.target_version)
+    done = store.get(p.dependency_id, p.target_version, p.attempt)
     if done and done.pr_url:
         store.fill_advisories(p.dependency_id, p.target_version, p.package, p.advisories)
         return PrResult("existing_in_store", done.pr_number, done.pr_url)
 
     store.record_approval(p.dependency_id, p.target_version, p.repo, p.branch,
-                          approved_by or getpass.getuser(), p.package, p.advisories)
+                          approved_by or getpass.getuser(), p.package, p.advisories, p.attempt)
 
     existing = client.find_pr(p.repo, p.branch)
     if existing:
-        store.record_pr(p.dependency_id, p.target_version, existing["number"], existing["html_url"])
+        store.record_pr(p.dependency_id, p.target_version, existing["number"], existing["html_url"], p.attempt)
         return PrResult("existing_on_github", existing["number"], existing["html_url"])
 
     if client.branch_sha(p.repo, p.branch) is None:
@@ -246,5 +305,5 @@ def open_pr(p: Proposal, client: GitHubClient, store: ActionStore,
                         blob_sha, f"Upgrade {p.package} to {p.target_version} (security advisories)")
 
     pr = client.create_pr(p.repo, p.branch, p.base, p.title, p.body)
-    store.record_pr(p.dependency_id, p.target_version, pr["number"], pr["html_url"])
+    store.record_pr(p.dependency_id, p.target_version, pr["number"], pr["html_url"], p.attempt)
     return PrResult("created", pr["number"], pr["html_url"])

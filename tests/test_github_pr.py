@@ -9,8 +9,9 @@ from urllib.parse import urlparse
 
 import pytest
 
+from triage import __main__ as cli
 from triage.github_pr import (GitHubClient, StaleProposal, ask_approval, branch_name,
-                              build_proposal, bump_line, open_pr)
+                              build_proposal, bump_line, open_pr, resolve)
 from triage.models import PlanStatus
 from triage.scanner import scan
 from triage.store import ActionStore
@@ -63,10 +64,20 @@ class FakeGitHub:
             return Resp(200, [p for p in self.pulls if p["head"] == head])
         if path == f"/repos/{REPO}/pulls" and method == "POST":
             n = len(self.pulls) + 1
-            pr = {"number": n, "html_url": f"https://github.com/{REPO}/pull/{n}", **json}
+            pr = {"number": n, "html_url": f"https://github.com/{REPO}/pull/{n}",
+                  "state": "open", "merged": False, "merged_at": None, **json}
             self.pulls.append(pr)
             return Resp(201, pr)
+        if path.startswith(f"/repos/{REPO}/pulls/") and method == "GET":
+            n = int(path.rsplit("/", 1)[1])
+            return Resp(200, self.pulls[n - 1])
         raise AssertionError(f"unexpected call {method} {path}")
+
+    def merge(self, n):
+        """Simulate a human merging PR n: base gets the branch's file."""
+        pr = self.pulls[n - 1]
+        pr.update(state="closed", merged=True, merged_at="2026-10-18T10:00:00Z")
+        self.files["main"] = dict(self.files[pr["head"]])
 
     def writes(self):
         return [c for c in self.calls if c[0] in ("POST", "PUT")]
@@ -199,3 +210,101 @@ def test_github_error_is_raised_not_swallowed(setup):
     gh.request = lambda *a, **k: Resp(403, {"message": "Resource not accessible by token"})
     with pytest.raises(Exception, match="403"):
         open_pr(proposals[0], client, store)
+
+
+# ---------- re-runs: merged/closed PR but base still vulnerable ----------
+
+def _reset_main(gh):
+    """What scripts/reset_demo.sh does: a new commit on main restoring the old pin."""
+    gh.files["main"] = {"requirements.txt": REQS}
+
+
+def test_merged_pr_and_file_vulnerable_again_needs_approval_then_opens_new_pr(setup):
+    proposals, gh, client, store = setup
+    p = proposals[0]
+    open_pr(p, client, store)
+    gh.merge(1)
+    _reset_main(gh)
+
+    res = resolve(p, client, store)
+    assert res.action == "new" and res.proposal.attempt == 2
+    assert res.proposal.branch == "triage/requests-2.32.4-2"
+    assert "previous PR #1 was merged" in res.proposal.body
+    assert gh.writes() and all(c[0] == "GET" for c in gh.calls[-3:])   # resolve itself only reads
+
+    # Declined -> nothing happens.
+    assert not ask_approval(res.proposal, input_fn=lambda _: "n", print_fn=lambda _: None)
+    assert len(gh.pulls) == 1
+    # Approved -> a fresh branch and PR #2; PR #1 untouched.
+    r = open_pr(res.proposal, client, store)
+    assert (r.outcome, r.pr_number) == ("created", 2)
+    assert gh.pulls[1]["head"] == "triage/requests-2.32.4-2" and gh.pulls[0]["merged"]
+    assert gh.files["triage/requests-2.32.4-2"]["requirements.txt"] == REQS.replace("2.19.0", "2.32.4")
+    assert store.get(p.dependency_id, "2.32.4").attempt == 2
+    assert store.get(p.dependency_id, "2.32.4", 1).pr_number == 1
+
+
+def test_open_pr_is_reused_not_duplicated(setup, tmp_path):
+    proposals, gh, client, store = setup
+    open_pr(proposals[0], client, store)
+    for s in (store, ActionStore(str(tmp_path / "fresh.db"))):     # also with an empty store
+        gh.calls.clear()
+        res = resolve(proposals[0], client, s)
+        assert (res.action, res.pr["number"]) == ("reuse", 1)
+        assert gh.writes() == [] and len(gh.pulls) == 1
+
+
+def test_merged_pr_and_file_already_fixed_is_no_action(setup):
+    proposals, gh, client, store = setup
+    open_pr(proposals[0], client, store)
+    gh.merge(1)                                      # main now pins 2.32.4
+    gh.calls.clear()
+    res = resolve(proposals[0], client, store)
+    assert res.action == "no_action" and "no longer 'requests==2.19.0'" in res.reason
+    assert gh.writes() == [] and len(gh.pulls) == 1
+
+
+def test_closed_unmerged_and_still_vulnerable_is_new_attempt(setup):
+    proposals, gh, client, store = setup
+    open_pr(proposals[0], client, store)
+    gh.pulls[0]["state"] = "closed"
+    res = resolve(proposals[0], client, store)
+    assert res.action == "new" and res.proposal.attempt == 2
+
+
+def test_second_rerun_reuses_attempt_2_instead_of_opening_attempt_3(setup):
+    proposals, gh, client, store = setup
+    open_pr(proposals[0], client, store)
+    gh.merge(1)
+    _reset_main(gh)
+    open_pr(resolve(proposals[0], client, store).proposal, client, store)
+    res = resolve(proposals[0], client, store)
+    assert (res.action, res.proposal.attempt, res.pr["number"]) == ("reuse", 2, 2)
+
+
+def test_cli_rerun_after_merge_asks_and_respects_no(setup, tmp_path, monkeypatch, capsys):
+    _, gh, client, _ = setup
+    db = str(tmp_path / "cli.db")
+    reqs = tmp_path / "requirements.txt"
+    reqs.write_text(REQS)
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    monkeypatch.setattr("triage.github_pr.GitHubClient", lambda token: client)
+    monkeypatch.setattr("triage.scanner.fetch_advisories", fake_fetch)
+    monkeypatch.setattr("triage.__main__.scan", lambda text: scan(text, fetch=fake_fetch))
+    args = [str(reqs), "--repo", REPO, "--open-prs", "--db", db]
+
+    answers = iter(["y", "n"])                       # requests: yes, Jinja2: no
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    assert cli.main(args) == 0 and len(gh.pulls) == 1
+    gh.merge(1)
+    _reset_main(gh)
+
+    answers = iter(["n", "n"])                       # re-run: decline the new requests attempt
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    cli.main(args)
+    assert "new action, attempt 2" in capsys.readouterr().out and len(gh.pulls) == 1
+
+    answers = iter(["y", "n"])                       # re-run: approve it
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    cli.main(args)
+    assert [p["head"] for p in gh.pulls] == ["triage/requests-2.32.4", "triage/requests-2.32.4-2"]
