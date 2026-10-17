@@ -7,8 +7,8 @@ Checks a repo's dependencies against public security advisories (OSV), opens upg
 ## Status
 
 - [x] Step 2 — Scanner core: parse `requirements.txt`, fetch OSV advisories, deterministic version-range matching with evidence
-- [ ] Step 3 — Upgrade PR action (human approval, no duplicate PRs on retry)
-- [ ] Step 4 — CI watcher (passing / failing / pending; merged is not deployed)
+- [x] Step 3 — Upgrade PR action (human approval, no duplicate PRs on retry)
+- [x] Step 4 — CI watcher (passing / failing / pending; merged is not deployed)
 - [ ] Step 5 — LangGraph orchestration + LLM explanations
 - [ ] Step 6 — SQLite store + web triage table
 - [ ] Step 7 — Deploy + run the 4 official test cases
@@ -23,6 +23,8 @@ python -m triage path/to/requirements.txt    # live scan against osv.dev
 python -m triage path/to/requirements.txt --json   # full evidence
 # propose upgrade PRs; each one asks y/N, approvals are stored in triage.db
 python -m triage path/to/requirements.txt --repo owner/name --open-prs
+# PR + CI triage table; --wait polls until no CI is pending
+python -m triage status --repo owner/name --wait
 ```
 
 ## Decision rules (no LLM)
