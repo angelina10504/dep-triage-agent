@@ -49,6 +49,7 @@ class Proposal:
     title: str
     body: str
     advisory_ids: list[str] = field(default_factory=list)
+    advisories: list[dict] = field(default_factory=list)   # [{"id", "aliases"}] for unique counting
 
     def render(self) -> str:
         return (
@@ -130,6 +131,8 @@ def build_proposal(plan: UpgradePlan, dep: Dependency, matches: list[AdvisoryMat
         title=f"Upgrade {plan.package} {dep.version} -> {plan.target_version} (security advisories)",
         body=_pr_body(plan, dep, matches, path),
         advisory_ids=list(plan.advisory_ids),
+        advisories=[{"id": m.advisory_id, "aliases": list(m.aliases)} for m in matches
+                    if m.dependency_id == dep.id and m.decision == Decision.VULNERABLE],
     )
 
 
@@ -162,6 +165,9 @@ class GitHubClient:
         if r.status_code not in ok:
             raise GitHubError(f"{method} {path} -> {r.status_code}: {r.text[:300]}")
         return r.json()
+
+    def get(self, path: str, **params):
+        return self._call("GET", path, params=params or None)
 
     def default_branch(self, repo: str) -> str:
         return self._call("GET", f"/repos/{repo}")["default_branch"]
@@ -215,10 +221,11 @@ def open_pr(p: Proposal, client: GitHubClient, store: ActionStore,
     """Run an APPROVED proposal. Safe to call again after a crash or retry."""
     done = store.get(p.dependency_id, p.target_version)
     if done and done.pr_url:
+        store.fill_advisories(p.dependency_id, p.target_version, p.package, p.advisories)
         return PrResult("existing_in_store", done.pr_number, done.pr_url)
 
     store.record_approval(p.dependency_id, p.target_version, p.repo, p.branch,
-                          approved_by or getpass.getuser())
+                          approved_by or getpass.getuser(), p.package, p.advisories)
 
     existing = client.find_pr(p.repo, p.branch)
     if existing:

@@ -1,6 +1,7 @@
 """Command line:
   python -m triage path/to/requirements.txt [--json]
   python -m triage path/to/requirements.txt --repo owner/name --open-prs   (asks y/N per PR)
+  python -m triage status --repo owner/name [--wait --timeout 600 --interval 15]
 """
 from __future__ import annotations
 
@@ -45,6 +46,7 @@ def _open_prs(args, result) -> int:
         p = build_proposal(plan, deps[plan.dependency_id], result.matches, args.repo, base, args.path)
         done = store.get(p.dependency_id, p.target_version)
         if done and done.pr_url:
+            store.fill_advisories(p.dependency_id, p.target_version, p.package, p.advisories)
             print(f"\n{p.package}: already handled, PR {done.pr_url} (approved {done.approved_at})")
             continue
         if not ask_approval(p):
@@ -55,7 +57,45 @@ def _open_prs(args, result) -> int:
     return 0
 
 
-def main() -> int:
+def _status(argv: list[str]) -> int:
+    from .ci_watch import render_table, watch
+    from .github_pr import GitHubClient, GitHubError
+    from .store import ActionStore
+
+    ap = argparse.ArgumentParser(prog="python -m triage status",
+                                 description="Show PR and CI status for every recorded upgrade PR.")
+    ap.add_argument("--repo", required=True, help="GitHub repo owner/name")
+    ap.add_argument("--db", default="triage.db", help="SQLite file recording approved actions")
+    ap.add_argument("--wait", action="store_true", help="poll until no PR has pending CI")
+    ap.add_argument("--timeout", type=float, default=600, help="seconds to wait at most (with --wait)")
+    ap.add_argument("--interval", type=float, default=15, help="seconds between polls (with --wait)")
+    args = ap.parse_args(argv)
+
+    _load_dotenv()
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        print("GITHUB_TOKEN is not set (put it in .env).", file=sys.stderr)
+        return 2
+    store = ActionStore(args.db)
+    if not store.with_prs(args.repo):
+        print(f"No upgrade PRs recorded for {args.repo} in {args.db}.")
+        return 0
+    try:
+        statuses, timed_out = watch(args.repo, GitHubClient(token), store, wait=args.wait,
+                                    timeout=args.timeout, interval=args.interval)
+    except GitHubError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(render_table(statuses))
+    if timed_out:
+        print(f"\nTimed out after {args.timeout:.0f}s; pending CI is still pending (not passing).")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["status"]:
+        return _status(argv[1:])
     ap = argparse.ArgumentParser(description="Scan a requirements.txt against OSV advisories.")
     ap.add_argument("requirements", help="path to requirements.txt")
     ap.add_argument("--json", action="store_true", help="print the full result as JSON (all evidence)")
@@ -64,7 +104,7 @@ def main() -> int:
     ap.add_argument("--base", help="base branch (default: the repo's default branch)")
     ap.add_argument("--db", default="triage.db", help="SQLite file recording approved actions")
     ap.add_argument("--open-prs", action="store_true", help="propose upgrade PRs, each needs y/N approval")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     if args.open_prs and not args.repo:
         ap.error("--open-prs needs --repo owner/name")
 

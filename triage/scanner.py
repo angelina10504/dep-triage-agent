@@ -16,9 +16,14 @@ _MAX_BUMPS = 10
 
 def count_vulnerabilities(matches: list[AdvisoryMatch]) -> int:
     """Unique vulnerabilities: records sharing an id or alias (GHSA-x, PYSEC-y, same CVE) count once."""
+    return count_unique([{m.advisory_id, *m.aliases} for m in matches])
+
+
+def count_unique(id_sets: list[set[str]]) -> int:
+    """Number of groups after merging every pair of id sets that overlap (transitively)."""
     groups: list[set[str]] = []
-    for m in matches:
-        ids = {m.advisory_id, *m.aliases}
+    for ids in id_sets:
+        ids = set(ids)
         overlapping = [g for g in groups if g & ids]
         for g in overlapping:
             ids |= g

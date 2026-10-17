@@ -153,6 +153,7 @@ def test_open_pr_creates_branch_commits_one_line_and_opens_pr(setup):
     assert gh.pulls[0]["head"] == "triage/requests-2.32.4" and gh.pulls[0]["base"] == "main"
     rec = store.get(proposals[0].dependency_id, "2.32.4")
     assert (rec.status, rec.pr_url, rec.approved_by) == ("pr_opened", r.pr_url, "tester")
+    assert (rec.package, rec.advisories) == ("requests", [{"id": "GHSA-TEST-REQ", "aliases": []}])
 
 
 def test_retry_uses_store_and_makes_no_github_calls(setup):
