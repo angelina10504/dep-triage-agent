@@ -142,3 +142,45 @@ def test_plan_no_fix_published_is_uncertain():
 def test_plan_clean_package_is_no_action():
     db = {"x": [adv("A", "PyPI", "x", [{"introduced": "0"}, {"fixed": "1.0"}])]}
     assert scan("x==1.5\n", fetch=_fetcher(db)).plans[0].status == PlanStatus.NO_ACTION
+
+
+# ---------- ranges before the explicit versions list ----------
+
+def test_range_wins_over_versions_list_and_reports_fix():
+    a = adv("A", "PyPI", "x", [{"introduced": "0"}, {"fixed": "2.0"}], versions=["1.0", "1.5"])
+    m = match_advisory(dep("x==1.5"), a, T)
+    assert m.decision == Decision.VULNERABLE
+    assert (m.affected_range, m.fixed_version) == (">=0, <2.0", "2.0")
+    assert m.reason == "1.5 is inside affected range >=0, <2.0"
+
+
+def test_versions_list_is_only_a_fallback_without_fix():
+    # Listed explicitly, but the range says 1.5 is outside -> fallback, no fixed version claimed.
+    a = adv("A", "PyPI", "x", [{"introduced": "2.0"}, {"fixed": "3.0"}], versions=["1.5"])
+    m = match_advisory(dep("x==1.5"), a, T)
+    assert m.decision == Decision.VULNERABLE and m.fixed_version is None
+    assert m.reason == "1.5 is listed explicitly as affected, but no version range covers it"
+
+
+# ---------- unique vulnerability count ----------
+
+def test_plan_counts_aliased_records_once():
+    db = {"x": [
+        adv("GHSA-1", "PyPI", "x", [{"introduced": "0"}, {"fixed": "2.0"}], aliases=["CVE-1"]),
+        adv("PYSEC-1", "PyPI", "x", [{"introduced": "0"}, {"fixed": "2.0"}], aliases=["CVE-1", "GHSA-1"]),
+        adv("PYSEC-2", "PyPI", "x", [{"introduced": "0"}, {"fixed": "2.0"}], aliases=["CVE-1"]),
+        adv("GHSA-2", "PyPI", "x", [{"introduced": "0"}, {"fixed": "2.0"}], aliases=["CVE-2"]),
+    ]}
+    plan = scan("x==1.0\n", fetch=_fetcher(db)).plans[0]
+    assert plan.reason == "upgrade to 2.0 fixes 2 vulnerabilities (4 advisory records)"
+
+
+def test_plan_merges_chains_of_aliases():
+    # A~B via CVE-1, B~C via CVE-2: one vulnerability even though A and C share nothing directly.
+    db = {"x": [
+        adv("A", "PyPI", "x", [{"introduced": "0"}, {"fixed": "2.0"}], aliases=["CVE-1"]),
+        adv("C", "PyPI", "x", [{"introduced": "0"}, {"fixed": "2.0"}], aliases=["CVE-2"]),
+        adv("B", "PyPI", "x", [{"introduced": "0"}, {"fixed": "2.0"}], aliases=["CVE-1", "CVE-2"]),
+    ]}
+    plan = scan("x==1.0\n", fetch=_fetcher(db)).plans[0]
+    assert plan.reason == "upgrade to 2.0 fixes 1 vulnerability (3 advisory records)"

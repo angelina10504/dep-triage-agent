@@ -14,6 +14,23 @@ Fetcher = Callable[[str, str], tuple[list[dict], str]]
 _MAX_BUMPS = 10
 
 
+def count_vulnerabilities(matches: list[AdvisoryMatch]) -> int:
+    """Unique vulnerabilities: records sharing an id or alias (GHSA-x, PYSEC-y, same CVE) count once."""
+    groups: list[set[str]] = []
+    for m in matches:
+        ids = {m.advisory_id, *m.aliases}
+        overlapping = [g for g in groups if g & ids]
+        for g in overlapping:
+            ids |= g
+            groups.remove(g)
+        groups.append(ids)
+    return len(groups)
+
+
+def _plural(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
+
+
 def _plan(dep, matches: list[AdvisoryMatch], advisories: list[dict], retrieved_at: str) -> UpgradePlan:
     vuln = [m for m in matches if m.decision == Decision.VULNERABLE]
     unsure = [m for m in matches if m.decision == Decision.UNCERTAIN]
@@ -42,8 +59,10 @@ def _plan(dep, matches: list[AdvisoryMatch], advisories: list[dict], retrieved_a
                  if (m := match_advisory(probe, adv, retrieved_at)).decision == Decision.VULNERABLE]
         if not still:
             return UpgradePlan(**base, target_version=target, status=PlanStatus.UPGRADE,
-                               reason=f"upgrade to {target} clears {len(ids)} "
-                                      f"advisor{'y' if len(ids) == 1 else 'ies'}", advisory_ids=ids)
+                               reason=f"upgrade to {target} fixes "
+                                      f"{_plural(count_vulnerabilities(vuln), 'vulnerability', 'vulnerabilities')} "
+                                      f"({_plural(len(ids), 'advisory record', 'advisory records')})",
+                               advisory_ids=ids)
         if any(not m.fixed_version for m in still):
             break
         target = max((m.fixed_version for m in still), key=Version)

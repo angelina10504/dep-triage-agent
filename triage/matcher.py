@@ -87,16 +87,9 @@ def match_advisory(dep: Dependency, adv: dict, retrieved_at: str) -> AdvisoryMat
     except InvalidVersion:
         return result(Decision.UNCERTAIN, f"installed version '{dep.version}' is not a valid version")
 
-    # Rule 3: compare against explicit version lists and version ranges.
+    # Rule 3: compare against version ranges first - they carry the range and the fix.
     saw_comparable_range = False
     for a in same_pkg:
-        if dep.version in a.get("versions", []):
-            fixed = None
-            for r in a.get("ranges", []):
-                if r.get("type") in _VERSION_RANGE_TYPES:
-                    _, _, fixed = _check_range(installed, r.get("events", []))
-            return result(Decision.VULNERABLE, f"{dep.version} is listed explicitly as affected",
-                          "explicit versions list", fixed)
         for r in a.get("ranges", []):
             if r.get("type") not in _VERSION_RANGE_TYPES:
                 continue
@@ -107,6 +100,12 @@ def match_advisory(dep: Dependency, adv: dict, retrieved_at: str) -> AdvisoryMat
                 return result(Decision.UNCERTAIN, f"advisory range has an unparseable version: {e}")
             if affected:
                 return result(Decision.VULNERABLE, f"{dep.version} is inside affected range {rng}", rng, fixed)
+
+    # Rule 4: fallback - the explicit versions list, which gives no fixed version.
+    if any(dep.version in a.get("versions", []) for a in same_pkg):
+        return result(Decision.VULNERABLE,
+                      f"{dep.version} is listed explicitly as affected, but no version range covers it",
+                      "explicit versions list", None)
 
     if not saw_comparable_range and not any(a.get("versions") for a in same_pkg):
         return result(Decision.UNCERTAIN, "advisory gives no version ranges to compare against")
