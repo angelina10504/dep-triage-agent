@@ -83,35 +83,66 @@ def _source_unavailable(dep, err: AdvisorySourceError) -> UpgradePlan:
                        reason=f"advisory source unavailable: {err.error_type}")
 
 
-def scan(requirements_text: str, fetch: Fetcher = fetch_advisories,
-         other_ecosystems: tuple[str, ...] = OTHER_ECOSYSTEMS) -> ScanResult:
-    deps = parse_requirements(requirements_text)
-    all_matches: list[AdvisoryMatch] = []
-    plans: list[UpgradePlan] = []
+def fetch_all(deps, fetch: Fetcher = fetch_advisories,
+              other_ecosystems: tuple[str, ...] = OTHER_ECOSYSTEMS) -> tuple[dict, list[str]]:
+    """Step 03 for every dependency. Plain JSON-able result keyed by dependency id."""
+    fetched: dict[str, dict] = {}
     warnings: list[str] = []
     for dep in deps:
         try:
             advisories, retrieved_at = fetch(dep.name, dep.ecosystem)
         except AdvisorySourceError as e:
-            # No data is not "no advisories": never plan an upgrade or call it safe.
-            plans.append(_source_unavailable(dep, e))
+            fetched[dep.id] = {"error": e.error_type, "advisories": [], "retrieved_at": None, "other": []}
             continue
-        matches = [match_advisory(dep, adv, retrieved_at) for adv in advisories]
-        plans.append(_plan(dep, matches, advisories, retrieved_at))
-
-        seen = {a.get("id") for a in advisories}
+        entry = {"error": None, "advisories": advisories, "retrieved_at": retrieved_at, "other": []}
         for eco in other_ecosystems:
             try:
                 others, other_at = fetch(dep.name, eco)
             except AdvisorySourceError as e:
                 warnings.append(f"{dep.id}: {eco} name-collision lookup failed ({e.error_type})")
                 continue
-            for adv in others:
+            entry["other"].append({"ecosystem": eco, "advisories": others, "retrieved_at": other_at})
+        fetched[dep.id] = entry
+    return fetched, warnings
+
+
+def match_all(deps, fetched: dict) -> list[AdvisoryMatch]:
+    """Step 02: deterministic matching, including the cross-ecosystem collisions (TC2)."""
+    out: list[AdvisoryMatch] = []
+    for dep in deps:
+        f = fetched[dep.id]
+        if f["error"]:
+            continue
+        out += [match_advisory(dep, adv, f["retrieved_at"]) for adv in f["advisories"]]
+        seen = {a.get("id") for a in f["advisories"]}
+        for o in f["other"]:
+            for adv in o["advisories"]:
                 if adv.get("id") in seen:
                     continue
                 seen.add(adv.get("id"))
-                m = match_advisory(dep, adv, other_at)
-                m.queried_ecosystem = eco
-                matches.append(m)
-        all_matches.extend(matches)
-    return ScanResult(dependencies=deps, matches=all_matches, plans=plans, warnings=warnings)
+                m = match_advisory(dep, adv, o["retrieved_at"])
+                m.queried_ecosystem = o["ecosystem"]
+                out.append(m)
+    return out
+
+
+def plan_all(deps, fetched: dict, matches: list[AdvisoryMatch]) -> list[UpgradePlan]:
+    plans = []
+    for dep in deps:
+        f = fetched[dep.id]
+        if f["error"]:
+            # No data is not "no advisories": never plan an upgrade or call it safe.
+            plans.append(_source_unavailable(dep, AdvisorySourceError(f["error"])))
+            continue
+        own = [m for m in matches if m.dependency_id == dep.id and m.queried_ecosystem == "PyPI"]
+        plans.append(_plan(dep, own, f["advisories"], f["retrieved_at"]))
+    return plans
+
+
+def scan(requirements_text: str, fetch: Fetcher = fetch_advisories,
+         other_ecosystems: tuple[str, ...] = OTHER_ECOSYSTEMS) -> ScanResult:
+    deps = parse_requirements(requirements_text)
+    fetched, warnings = fetch_all(deps, fetch, other_ecosystems)
+    matches = match_all(deps, fetched)
+    return ScanResult(dependencies=deps, matches=matches, plans=plan_all(deps, fetched, matches),
+                      warnings=warnings)

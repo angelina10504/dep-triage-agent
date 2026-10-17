@@ -1,0 +1,118 @@
+== PLAN ==
+
+PACKAGE       CURRENT   TARGET    STATUS     REASON
+requests      2.33.0    -         no_action  no advisory affects the installed version
+Werkzeug      2.2.2     3.1.9     upgrade    upgrade to 3.1.9 fixes 10 vulnerabilities (20 advisory records)
+MarkupSafe    2.1.5     -         no_action  no advisory affects the installed version
+Markdown      3.11.1    -         no_action  no advisory affects the installed version
+
+Per-advisory decisions (PyPI):
+  [not_affected] PyPI:requests@2.33.0#L1      GHSA-652x-xj99-gmcc    2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      GHSA-9hjg-9r4m-mvj7    2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      GHSA-9wx4-h78v-vm56    2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      GHSA-cfj3-7x9c-4p3h    2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      GHSA-gc5v-m9x4-r6x2    2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      GHSA-j8r2-6x86-q33q    2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      GHSA-pg2w-x9wp-vw92    2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      GHSA-x84v-xcm2-53pg    2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      PYSEC-2014-13          2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      PYSEC-2014-14          2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      PYSEC-2015-17          2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      PYSEC-2018-28          2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      PYSEC-2023-74          2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      PYSEC-2026-1872        2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      PYSEC-2026-1873        2.33.0 is outside every affected range
+  [not_affected] PyPI:requests@2.33.0#L1      PYSEC-2026-2275        2.33.0 is outside every affected range
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       GHSA-29vq-49wr-vm6x    2.2.2 is inside affected range >=0, <3.1.6
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       GHSA-2g68-c3qc-8985    2.2.2 is inside affected range >=0, <3.0.3
+  [not_affected] PyPI:werkzeug@2.2.2#L2       GHSA-3p3h-qghp-hvh2    2.2.2 is outside every affected range
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       GHSA-87hc-h4r5-73f7    2.2.2 is inside affected range >=0, <3.1.5
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       GHSA-f9vj-2wh5-fj8j    2.2.2 is inside affected range >=0, <3.0.6
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       GHSA-g6x2-hccm-hh4m    2.2.2 is inside affected range >=0, <3.1.9
+  [not_affected] PyPI:werkzeug@2.2.2#L2       GHSA-gq9m-qvpx-68hc    2.2.2 is outside every affected range
+  [not_affected] PyPI:werkzeug@2.2.2#L2       GHSA-h2fp-xgx6-xh6f    2.2.2 is outside every affected range
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       GHSA-hgf8-39gv-g3f2    2.2.2 is inside affected range >=0, <3.1.4
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       GHSA-hrfv-mqp8-q5rw    2.2.2 is inside affected range >=2.0.0rc1, <2.3.8
+  [not_affected] PyPI:werkzeug@2.2.2#L2       GHSA-j544-7q9p-6xp8    2.2.2 is outside every affected range
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       GHSA-px8h-6qxv-m22q    2.2.2 is inside affected range >=0, <2.2.3
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       GHSA-q34m-jh98-gwm2    2.2.2 is inside affected range >=2.0.0rc1, <3.0.6
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       GHSA-xg9f-g7g7-2323    2.2.2 is inside affected range >=0, <2.2.3
+  [not_affected] PyPI:werkzeug@2.2.2#L2       PYSEC-2017-43          2.2.2 is outside every affected range
+  [not_affected] PyPI:werkzeug@2.2.2#L2       PYSEC-2019-140         2.2.2 is outside every affected range
+  [not_affected] PyPI:werkzeug@2.2.2#L2       PYSEC-2020-157         2.2.2 is outside every affected range
+  [not_affected] PyPI:werkzeug@2.2.2#L2       PYSEC-2022-203         2.2.2 is outside every affected range
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       PYSEC-2023-221         2.2.2 is inside affected range >=0, <2.3.8
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       PYSEC-2023-57          2.2.2 is inside affected range >=0, <2.2.3
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       PYSEC-2023-58          2.2.2 is inside affected range >=0, <2.2.3
+  [not_affected] PyPI:werkzeug@2.2.2#L2       PYSEC-2026-1065        2.2.2 is outside every affected range
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       PYSEC-2026-2043        2.2.2 is inside affected range >=0, <3.0.3
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       PYSEC-2026-2044        2.2.2 is inside affected range >=0, <3.1.5
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       PYSEC-2026-2045        2.2.2 is inside affected range >=0, <3.0.6
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       PYSEC-2026-2046        2.2.2 is inside affected range >=0, <3.1.4
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       PYSEC-2026-2320        2.2.2 is inside affected range >=0, <3.1.6
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       PYSEC-2026-3417        2.2.2 is inside affected range >=2.0.0rc1, <3.0.6
+  [vulnerable  ] PyPI:werkzeug@2.2.2#L2       PYSEC-2026-4312        2.2.2 is inside affected range >=0, <3.1.9
+  [not_affected] PyPI:markdown@3.11.1#L4      GHSA-5wmx-573v-2qwq    3.11.1 is outside every affected range
+  [not_affected] PyPI:markdown@3.11.1#L4      PYSEC-2026-89          3.11.1 is outside every affected range
+
+Same name in other ecosystems (TC2 - not this package, never upgraded):
+  PyPI:markdown@3.11.1#L4      GHSA-wx77-rp39-c6vg    excluded: advisory is for npm/markdown, dependency is PyPI/markdown
+
+== UPGRADE RISK (from fetched release notes) ==
+Werkzeug 2.2.2 -> 3.1.9 [ok]
+  breaking risk: high - Upgrading from 2.2.2 to 3.1.9 crosses a major version boundary and removes a large set of APIs that were deprecated in 2.3.0, drops Python 3.7 and 3.8 support, changes defaults for security‑related parameters, and deprecates several classes and functions. These removals are likely to break existing callers.
+    - Removed previously deprecated code in 3.0.0, which includes the removal of passing bytes where strings are expected, the ``charset`` and ``errors`` parameters, and many other AP... (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L278)
+    - Removed the ``werkzeug.urls`` module (except ``uri_to_iri`` and ``iri_to_uri``) that was deprecated in 2.3.0. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L278)
+    - Removed the ``safe_conversion`` parameter of ``iri_to_uri`` that was deprecated in 2.3.0. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L278)
+    - Removed ``werkzeug.wsgi.make_line_iter`` and ``make_chunk_iter`` deprecated in 2.3.0. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L278)
+    - Removed the ``is_filename`` parameter to ``unquote_header_value`` deprecated in 2.3.0. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L278)
+    - Removed ``extra_chars`` parameter, byte‑accepting ``quote_header_value``, ``allow_token`` in ``dump_header``, and ``cls`` in ``parse_dict_header`` deprecated in 2.3.0. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L278)
+    - Removed ``parse_authorization_header`` and ``parse_www_authenticate_header`` deprecated in 2.3.0. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L278)
+    - Removed ``WWWAuthenticate.set_basic`` and ``set_digest`` methods deprecated in 2.3.0. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L278)
+    - Removed byte‑accepting ``parse_cookie`` and ``dump_cookie`` and the ``dump_cookie`` ``charset`` parameter deprecated in 2.3.0. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L278)
+    - Removed the ``cookie_jar`` attribute deprecated in 2.3.0. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L278)
+    - Removed the first positional ``server_name`` parameter to ``set_cookie`` and ``delete_cookie`` deprecated in 2.3.0. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L278)
+    - Removed additional parameters to ``delete_cookie`` beyond ``domain``, ``path``, and ``value`` deprecated in 2.3.0. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L278)
+    - Removed the ``Map`` ``charset`` parameter and ``Request.url_charset`` property deprecated in 2.3.0. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L278)
+    - Removed ``Request.charset``, ``Request.encoding_errors``, ``Response.charset``, and ``Client.charset`` attributes deprecated in 2.3.0. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L278)
+    - Removed ``FormDataParser`` ``parse_functions`` attribute and ``get_parse_func`` method deprecated in 2.3.0. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L278)
+    - Removed plain hash methods from ``generate_password_hash``; only scrypt and pbkdf2 are supported, deprecated in 2.3.0. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L278)
+    - Dropped support for Python 3.7 in 2.3.0. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L389)
+    - Dropped support for Python 3.8 in 3.1.0. (https://github.com/pallets/werkzeug/releases/tag/3.1.0)
+    - Deprecated and removed the ``__version__`` attribute in 3.0.0 (deprecation) and 3.1.0 (removal). (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L279-L280)
+    - Changed default work factor for PBKDF2 to 1,000,000 iterations in 3.1.0 (was 600,000 in 2.3.0). (https://github.com/pallets/werkzeug/releases/tag/3.1.0)
+    - ``Request.max_form_memory_size`` now defaults to 500 kB instead of unlimited in 3.1.0. (https://github.com/pallets/werkzeug/releases/tag/3.1.0)
+    - ``OrderedMultiDict`` and ``ImmutableOrderedMultiDict`` are deprecated in 3.1.0; code using them must switch to ``MultiDict`` and ``ImmutableMultiDict``. (https://github.com/pallets/werkzeug/releases/tag/3.1.0)
+    - ``MultiDict`` initialization now only accepts ``list``, ``tuple`` or ``set`` for multiple values (changed in 3.1.3). (https://github.com/pallets/werkzeug/releases/tag/3.1.3)
+    - ``Request.host``, ``get_host`` and ``host_is_trusted`` now reject empty values and ignore Unix socket addresses (changed in 3.1.7). (https://github.com/pallets/werkzeug/releases/tag/3.1.7)
+    - Form data of type ``application/x-www-form-urlencoded`` is no longer limited by ``max_form_memory_size`` but only by ``max_content_length`` (changed in 3.1.9). (https://github.com/pallets/werkzeug/releases/tag/3.1.9)
+    - Invalid ``Range`` suffix length ``-0`` is no longer accepted (changed in 3.1.9). (https://github.com/pallets/werkzeug/releases/tag/3.1.9)
+    deprecated earlier, removed later (deterministic, from the fetched notes):
+    - Passing bytes where strings are expected is deprecated, as well as the ``charset`` and ``errors`` parameters in many places. Anywhere that was annotated, documented, or tested t... (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L391-L396)
+    - Deprecate the ``werkzeug.urls`` module, except for the ``uri_to_iri`` and ``iri_to_uri`` functions. Use the ``urllib.parse`` library instead. :issue:`2600` (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L397-L398)
+    - Deprecate the ``safe_conversion`` parameter of ``iri_to_uri``. The ``Location`` header is converted to IRI using the same process as everywhere else. :issue:`2609` (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L403-L404)
+    - Deprecate ``werkzeug.wsgi.make_line_iter`` and ``make_chunk_iter``. :pr:`2613` (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L405)
+    - The ``is_filename`` parameter to ``unquote_header_value`` is deprecated. :pr:`2614` (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L425)
+    - Deprecate the ``extra_chars`` parameter and passing bytes to ``quote_header_value``, the ``allow_token`` parameter to ``dump_header``, and the ``cls`` parameter and passing byte... (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L426-L428)
+    - Both classes have a ``from_header`` class method. ``parse_authorization_header`` and ``parse_www_authenticate_header`` are deprecated. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L446-L447)
+    - The methods ``WWWAuthenticate.set_basic`` and ``set_digest`` are deprecated. Instead, an instance should be created and assigned to ``response.www_authenticate``. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L448-L450)
+    - Passing bytes to ``parse_cookie`` and ``dump_cookie`` is deprecated. The ``dump_cookie`` ``charset`` parameter is deprecated. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L458-L459)
+    - The ``cookie_jar`` attribute is deprecated. ``http.cookiejar`` is no longer used for storage. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L466-L467)
+    - The first positional ``server_name`` parameter to ``set_cookie`` and ``delete_cookie`` is deprecated. Use the ``domain`` parameter instead. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L473-L474)
+    - Other parameters to ``delete_cookie`` besides ``domain``, ``path``, and ``value`` are deprecated. (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L475-L476)
+    - The ``Map`` ``charset`` parameter and ``Request.url_charset`` property are deprecated. Percent encoding in URLs must always represent UTF-8 bytes. Invalid bytes are left percent... (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L491-L493)
+    - The ``Request.charset``, ``Request.encoding_errors``, ``Response.charset``, and ``Client.charset`` attributes are deprecated. Request and response data must always use UTF-8. :i... (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L494-L496)
+    - The ``FormDataParser`` ``parse_functions`` attribute and ``get_parse_func`` method, and the invalid ``application/x-url-encoded`` content type, are deprecated. :pr:`2653` (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L504-L506)
+    - ``generate_password_hash`` supports scrypt. Plain hash methods are deprecated, only scrypt and pbkdf2 are supported. :issue:`2654` (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L507-L508)
+    - ``iri_to_uri`` shows a deprecation warning instead of an error when passing bytes. :issue:`2708` (https://github.com/pallets/werkzeug/blob/3.1.9/CHANGES.rst#L330-L331)
+
+== EXPLANATION (LLM, advisory only) ==
+Werkzeug -> 3.1.9 [groq/openai/gpt-oss-120b]
+  Summary: The current Werkzeug 2.2.2 is affected by multiple advisories, including safe_join issues on Windows and resource exhaustion in multipart parsing. Upgrading to 3.1.9 moves the package outside these advisories' affected ranges.
+  Upgrade risk: The jump crosses a major version boundary, so API changes or deprecations may affect the application.
+  Reviewer checklist: Check for any breaking API changes between 2.x and 3.x. Verify that the test suite passes with the new version. Confirm that any custom Werkzeug extensions still work.
+
+== ACTIONS ==
+scan only (no --repo): no PRs proposed
+
+(thread triage-20261017-223656)

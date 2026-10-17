@@ -228,6 +228,13 @@ class GitHubClient:
     def get(self, path: str, **params):
         return self._call("GET", path, params=params or None)
 
+    def get_text(self, path: str) -> str:
+        """Plain-text endpoints such as job logs (GitHub redirects to blob storage)."""
+        r = self.s.request("GET", f"{self.api}{path}", timeout=30)
+        if r.status_code != 200:
+            raise GitHubError(f"GET {path} -> {r.status_code}: {r.text[:300]}")
+        return r.text
+
     def default_branch(self, repo: str) -> str:
         return self._call("GET", f"/repos/{repo}")["default_branch"]
 

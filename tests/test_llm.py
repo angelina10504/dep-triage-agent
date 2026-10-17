@@ -217,7 +217,74 @@ def test_deterministic_modules_do_not_import_the_llm():
 
 def test_pr_body_gets_labelled_explanation_or_unavailable_note():
     from triage.explain import Explanation
-    good = cli._with_explanation("BODY", Explanation("ok", **GOOD, detail="groq/m"))
+    from triage.explain import with_explanation
+    good = with_explanation("BODY", Explanation("ok", **GOOD, detail="groq/m"))
     assert "### Explanation (LLM, advisory only)" in good and GOOD["upgrade_risk"] in good
-    bad = cli._with_explanation("BODY", Explanation("unavailable", detail="HTTP 429"))
+    bad = with_explanation("BODY", Explanation("unavailable", detail="HTTP 429"))
     assert bad.endswith("LLM explanation unavailable (HTTP 429).")
+
+
+# ---------- no "fixed / deployed / resolved / safe now" claims ----------
+
+@pytest.mark.parametrize("word", ["fixed", "Deployed", "resolved", "safe now"])
+def test_banned_wording_retried_once_then_accepted(cache, word):
+    bad = {**GOOD, "summary": f"After the upgrade the issue is {word}."}
+    p, s = provider(ok(bad), ok(GOOD))
+    r = werkzeug_scan()
+    e = explain(r.plans[0], r.matches, cache, p)
+    assert e.status == "ok" and e.summary == GOOD["summary"] and len(s.payloads) == 2
+    retry_system = s.payloads[1]["messages"][0]["content"]
+    assert "rejected" in retry_system and "banned wording" in retry_system
+
+
+def test_banned_wording_twice_is_unavailable_and_not_cached(cache):
+    bad = {**GOOD, "upgrade_risk": "Everything is fixed."}
+    p, s = provider(ok(bad))
+    r = werkzeug_scan()
+    e = explain(r.plans[0], r.matches, cache, p)
+    assert (e.status, e.detail) == ("unavailable", "InvalidOutput (banned wording 'fixed')")
+    assert len(s.payloads) == 2 and cache.get(LLMCache.key("groq", "openai/gpt-oss-20b", "x", "y", SCHEMA)) is None
+
+
+def test_prompt_asks_for_the_affected_range_wording(cache):
+    p, s = provider(ok(GOOD))
+    r = werkzeug_scan()
+    explain(r.plans[0], r.matches, cache, p)
+    assert "the target version is outside these advisories' affected ranges" in s.payloads[0]["messages"][0]["content"]
+
+
+def test_words_inside_other_words_are_allowed(cache):
+    fine = {**GOOD, "summary": "Prefixed paths and unresolvedness are discussed."}
+    p, s = provider(ok(fine))
+    r = werkzeug_scan()
+    assert explain(r.plans[0], r.matches, cache, p).status == "ok" and len(s.payloads) == 1
+
+
+def test_groq_schema_validation_failure_is_retried_once(cache):
+    p, s = provider(Resp(400, {"error": {"code": "json_validate_failed", "failed_generation": ""}}), ok(GOOD))
+    r = werkzeug_scan()
+    assert explain(r.plans[0], r.matches, cache, p).status == "ok" and len(s.payloads) == 2
+
+
+def test_gpt_oss_gets_low_reasoning_effort_and_room_to_answer(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "k")
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("GROQ_MODEL", raising=False)
+    assert get_provider().extra == {"reasoning_effort": "low"}
+    monkeypatch.setenv("GROQ_MODEL", "qwen/qwen3.8-27b")
+    assert get_provider().extra == {}
+
+
+def test_cached_answer_failing_newer_rules_is_a_miss(cache):
+    from triage.llm import ask_json
+    p, s = provider(ok({**GOOD, "summary": "old answer"}), ok(GOOD))
+    first = ask_json(p, cache, "x", "sys", "user", SCHEMA, "n", claim_fields=("summary",))
+    assert first.status == "ok"
+
+    def newer_rule(out):
+        if out["summary"] == "old answer":
+            raise LLMError("InvalidOutput (new rule)")
+        return out
+    again = ask_json(p, cache, "x", "sys", "user", SCHEMA, "n", claim_fields=("summary",), validate=newer_rule)
+    assert again.status == "ok" and again.data["summary"] == GOOD["summary"] and len(s.payloads) == 2
+    assert ("x", "cache_rejected", "InvalidOutput (new rule)") in cache.events()

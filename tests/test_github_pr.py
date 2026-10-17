@@ -68,9 +68,14 @@ class FakeGitHub:
                   "state": "open", "merged": False, "merged_at": None, **json}
             self.pulls.append(pr)
             return Resp(201, pr)
+        if "/commits/" in path and path.endswith("/check-runs"):
+            return Resp(200, {"check_runs": []})
+        if "/commits/" in path and path.endswith("/status"):
+            return Resp(200, {"statuses": []})
         if path.startswith(f"/repos/{REPO}/pulls/") and method == "GET":
             n = int(path.rsplit("/", 1)[1])
-            return Resp(200, self.pulls[n - 1])
+            pr = self.pulls[n - 1]            # real GitHub: head is an object with the commit sha
+            return Resp(200, {**pr, "head": {"ref": pr["head"], "sha": f"sha-{pr['head']}"}})
         raise AssertionError(f"unexpected call {method} {path}")
 
     def merge(self, n):
@@ -283,28 +288,32 @@ def test_second_rerun_reuses_attempt_2_instead_of_opening_attempt_3(setup):
 
 
 def test_cli_rerun_after_merge_asks_and_respects_no(setup, tmp_path, monkeypatch, capsys):
+    """Through the LangGraph run: the y/N answer is the resume value of the approval interrupt."""
+    from triage.release_notes import ReleaseNotes
     _, gh, client, _ = setup
-    db = str(tmp_path / "cli.db")
+    db, cp = str(tmp_path / "cli.db"), str(tmp_path / "cp.db")
     reqs = tmp_path / "requirements.txt"
     reqs.write_text(REQS)
     monkeypatch.setenv("GITHUB_TOKEN", "t")
+    monkeypatch.setenv("LLM_PROVIDER", "none")
     monkeypatch.setattr("triage.github_pr.GitHubClient", lambda token: client)
-    monkeypatch.setattr("triage.scanner.fetch_advisories", fake_fetch)
-    monkeypatch.setattr("triage.__main__.scan", lambda text: scan(text, fetch=fake_fetch))
-    args = [str(reqs), "--repo", REPO, "--open-prs", "--db", db]
+    monkeypatch.setattr("triage.osv.fetch_advisories", fake_fetch)
+    monkeypatch.setattr("triage.release_notes.fetch_release_notes", lambda *a, **k: ReleaseNotes(None, note="none"))
 
-    answers = iter(["y", "n"])                       # requests: yes, Jinja2: no
-    monkeypatch.setattr("builtins.input", lambda _: next(answers))
-    assert cli.main(args) == 0 and len(gh.pulls) == 1
+    def run(answers, thread):
+        it = iter(answers)
+        monkeypatch.setattr("builtins.input", lambda _: next(it))
+        assert cli.main(["run", str(reqs), "--repo", REPO, "--db", db, "--checkpoints", cp,
+                         "--thread", thread, "--no-wait"]) == 0
+        return capsys.readouterr().out
+
+    run(["y", "n"], "t1")                            # requests: yes, Jinja2: no
+    assert len(gh.pulls) == 1
     gh.merge(1)
     _reset_main(gh)
 
-    answers = iter(["n", "n"])                       # re-run: decline the new requests attempt
-    monkeypatch.setattr("builtins.input", lambda _: next(answers))
-    cli.main(args)
-    assert "new action, attempt 2" in capsys.readouterr().out and len(gh.pulls) == 1
+    out = run(["n", "n"], "t2")                      # re-run: decline the new requests attempt
+    assert "new action, attempt 2" in out and len(gh.pulls) == 1
 
-    answers = iter(["y", "n"])                       # re-run: approve it
-    monkeypatch.setattr("builtins.input", lambda _: next(answers))
-    cli.main(args)
+    run(["y", "n"], "t3")                            # re-run: approve it
     assert [p["head"] for p in gh.pulls] == ["triage/requests-2.32.4", "triage/requests-2.32.4-2"]

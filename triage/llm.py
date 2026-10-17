@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -21,7 +22,11 @@ from typing import Callable, Protocol
 
 import requests
 
-PROMPT_VERSION = "explain-v1"
+PROMPT_VERSION = "v2"
+# Claims only CI + a human merge (and a deployment we never observe) could justify.
+BANNED = re.compile(r"\b(fixed|deployed|resolved)\b|\bsafe now\b", re.IGNORECASE)
+NO_CLAIMS = ("Never use the words 'fixed', 'deployed', 'resolved' or 'safe now'. To say the upgrade "
+             "clears an advisory, write: the target version is outside these advisories' affected ranges.")
 BACKOFF = (1, 2, 4)
 MAX_RETRY_AFTER = 30          # never sleep longer than this on one Retry-After
 
@@ -50,8 +55,9 @@ class OpenAICompatibleProvider:
 
     def __init__(self, name: str, base_url: str, api_key: str, model: str,
                  session: requests.Session | None = None, sleep: Callable[[float], None] = time.sleep,
-                 timeout: int = 30):
+                 timeout: int = 60, extra: dict | None = None):
         self.name, self.base_url, self.model = name, base_url.rstrip("/"), model
+        self.extra = extra or {}            # provider/model-specific request fields
         self.s = session or requests.Session()
         self.s.headers.update({"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
         self.sleep, self.timeout = sleep, timeout
@@ -67,6 +73,9 @@ class OpenAICompatibleProvider:
                 if r.status_code == 200:
                     return r.json()
                 reason = f"HTTP {r.status_code}"
+                if r.status_code == 400 and "json_validate_failed" in r.text:
+                    # The model's output did not fit the schema (often: ran out of tokens).
+                    raise LLMError("InvalidOutput (json_validate_failed)")
                 if r.status_code != 429 and r.status_code < 500:
                     raise LLMError(reason)          # 400/401/403...: retrying won't help
                 if r.status_code == 429 and attempt < len(BACKOFF):
@@ -87,13 +96,22 @@ class OpenAICompatibleProvider:
             "response_format": {"type": "json_schema",
                                 "json_schema": {"name": schema_name, "strict": True, "schema": schema}},
             "temperature": 0.2,
-            "max_completion_tokens": 1024,
+            "max_completion_tokens": 4096,      # reasoning models spend part of this before answering
+            **self.extra,
         })
         try:
             out = json.loads(data["choices"][0]["message"]["content"])
         except (KeyError, IndexError, TypeError, ValueError):
             raise LLMError("InvalidOutput") from None
-        missing = [k for k in schema["required"] if not isinstance(out.get(k), str) or not out[k].strip()]
+        if not isinstance(out, dict):
+            raise LLMError("InvalidOutput")
+        missing = []
+        for k in schema["required"]:
+            typ = schema["properties"][k].get("type")
+            v = out.get(k)
+            if (typ == "array" and not isinstance(v, list)) or \
+               (typ == "string" and (not isinstance(v, str) or not v.strip())):
+                missing.append(k)
         if missing:
             raise LLMError(f"InvalidOutput (missing {', '.join(missing)})")
         return out
@@ -103,8 +121,9 @@ def _groq() -> LLMProvider:
     key = os.environ.get("GROQ_API_KEY")
     if not key:
         raise LLMError("GROQ_API_KEY not set")
-    return OpenAICompatibleProvider("groq", "https://api.groq.com/openai/v1", key,
-                                    os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b"))
+    model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
+    extra = {"reasoning_effort": "low"} if model.startswith("openai/gpt-oss") else {}
+    return OpenAICompatibleProvider("groq", "https://api.groq.com/openai/v1", key, model, extra=extra)
 
 
 def _gemini() -> LLMProvider:
@@ -160,3 +179,76 @@ class LLMCache:
 
     def events(self) -> list[tuple]:
         return self.db.execute("SELECT subject, status, detail FROM llm_events ORDER BY id").fetchall()
+
+
+@dataclass
+class LLMResult:
+    status: str              # ok | cached | unavailable | disabled
+    data: dict | None
+    detail: str              # provider/model, or why unavailable
+
+    @property
+    def available(self) -> bool:
+        return self.status in ("ok", "cached")
+
+
+def banned_word(out: dict, fields: tuple[str, ...]) -> str | None:
+    for f in fields:
+        if isinstance(out.get(f), str) and (m := BANNED.search(out[f])):
+            return m.group(0)
+    return None
+
+
+def ask_json(llm: LLMProvider | None | str, cache: "LLMCache", subject: str, system: str, user: str,
+             schema: dict, schema_name: str, claim_fields: tuple[str, ...],
+             validate: Callable[[dict], dict] | None = None) -> LLMResult:
+    """One cached, validated LLM call. Never raises.
+
+    claim_fields are checked for BANNED wording; validate() may clean the output or raise
+    LLMError. Either problem gets ONE retry with a correction note, then "unavailable".
+    provider "env" means: read LLM_PROVIDER.
+    """
+    try:
+        llm = get_provider() if llm == "env" else llm
+    except LLMError as e:
+        cache.log("-", subject, "unavailable", e.reason)
+        return LLMResult("unavailable", None, e.reason)
+    if llm is None:
+        return LLMResult("disabled", None, "LLM disabled")
+    system = f"{system}\n{NO_CLAIMS}"
+    key = cache.key(llm.name, llm.model, system, user, schema)
+    if (hit := cache.get(key)) is not None:
+        try:     # the rules may be newer than the cached answer: re-check, else treat as a miss
+            hit = validate(hit) if validate else hit
+            stale = banned_word(hit, claim_fields)
+        except LLMError as e:
+            stale = e.reason
+        if not stale:
+            cache.log(key, subject, "cached")
+            return LLMResult("cached", hit, f"{llm.name}/{llm.model} (cached)")
+        cache.log(key, subject, "cache_rejected", str(stale))
+    problem = ""
+    for attempt in range(2):
+        prompt = system if not attempt else (
+            f"{system}\nYour previous answer was rejected: {problem}. Answer again and correct that.")
+        try:
+            out = llm.complete_json(prompt, user, schema, schema_name)
+            if validate:
+                out = validate(out)
+        except LLMError as e:
+            if not e.reason.startswith("InvalidOutput (") or attempt:
+                cache.log(key, subject, "unavailable", e.reason)
+                return LLMResult("unavailable", None, e.reason)
+            problem = e.reason
+            continue
+        except Exception as e:                  # never let the optional layer break the run
+            cache.log(key, subject, "unavailable", type(e).__name__)
+            return LLMResult("unavailable", None, type(e).__name__)
+        word = banned_word(out, claim_fields)
+        if word is None:
+            cache.put(key, llm.name, llm.model, out)
+            cache.log(key, subject, "ok")
+            return LLMResult("ok", out, f"{llm.name}/{llm.model}")
+        problem = f"InvalidOutput (banned wording '{word}')"
+    cache.log(key, subject, "unavailable", problem)
+    return LLMResult("unavailable", None, problem)

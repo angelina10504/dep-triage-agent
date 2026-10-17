@@ -1,7 +1,10 @@
 """Command line:
-  python -m triage path/to/requirements.txt [--json]
-  python -m triage path/to/requirements.txt --repo owner/name --open-prs   (asks y/N per PR)
-  python -m triage status --repo owner/name [--wait --timeout 600 --interval 15]
+  python -m triage path/to/requirements.txt [--json] [--explain]     scan only, no GitHub writes
+  python -m triage run path/to/requirements.txt --repo owner/name    full LangGraph run (asks y/N)
+  python -m triage path/to/requirements.txt --repo owner/name --open-prs   (same as run)
+  python -m triage resume --thread <id>                              answer a paused approval
+  python -m triage status --repo owner/name [--wait]                 PR + CI table (+ diagnosis)
+  python -m triage graph [docs/graph.md]                             write the graph as Mermaid
 """
 from __future__ import annotations
 
@@ -12,6 +15,7 @@ import sys
 from pathlib import Path
 
 from .models import PlanStatus
+from .report import format_scan
 from .scanner import scan
 
 
@@ -47,54 +51,108 @@ def _explanations(args, result) -> dict:
     return out
 
 
-def _with_explanation(body: str, e) -> str:
-    if e is None:
-        return body
-    text = e.render() if e.available else f"LLM explanation unavailable ({e.detail})."
-    return (body + "\n\n### Explanation (LLM, advisory only)\n"
-            "_Written by an LLM from the facts above; it did not choose the version or open this PR._\n\n"
-            + text.replace("\n", "\n\n"))
-
-
-def _open_prs(args, result, explanations: dict | None = None) -> int:
-    from .github_pr import GitHubClient, ask_approval, build_proposal, open_pr, resolve
+def _runtime(args, wait: bool):
+    from . import osv
+    from .github_pr import GitHubClient
+    from .graph import Runtime
+    from .llm import LLMCache
+    from .release_notes import fetch_release_notes
     from .store import ActionStore
 
-    upgrades = [p for p in result.plans if p.status == PlanStatus.UPGRADE]
-    if not upgrades:            # uncertain / no_action plans never become PRs
-        print("\nNo upgrade plans - no PRs proposed.")
-        return 0
     _load_dotenv()
     token = os.environ.get("GITHUB_TOKEN")
-    if not token:
-        print("GITHUB_TOKEN is not set (put it in .env). No PRs opened.", file=sys.stderr)
-        return 2
-    client = GitHubClient(token)
-    store = ActionStore(args.db)
-    base = args.base or client.default_branch(args.repo)
-    deps = {d.id: d for d in result.dependencies}
+    return Runtime(
+        store=ActionStore(args.db), cache=LLMCache(args.db),
+        github=(lambda: GitHubClient(token)) if token else None,
+        fetch=osv.fetch_advisories,
+        notes=lambda name, cur, tgt: fetch_release_notes(name, cur, tgt, github_token=token),
+        wait=wait, timeout=args.timeout, interval=args.interval)
 
-    for plan in upgrades:
-        p = build_proposal(plan, deps[plan.dependency_id], result.matches, args.repo, base, args.path)
-        if explanations and (e := explanations.get(p.dependency_id)) and e.status != "disabled":
-            p.body = _with_explanation(p.body, e)
-        store.fill_advisories(p.dependency_id, p.target_version, p.package, p.advisories)
-        res = resolve(p, client, store)
-        if res.action == "reuse":
-            print(f"\n{p.package}: already handled, {res.reason}: {res.pr['html_url']} (not opening another)")
-            continue
-        if res.action == "no_action":
-            print(f"\n{p.package}: no action - {res.reason}")
-            continue
-        p = res.proposal
-        if p.attempt > 1:
-            print(f"\n{p.package}: previous PR #{res.pr['number']} was merged/closed but {p.path} on "
-                  f"{p.base} still pins {p.old_line!r} -> new action, attempt {p.attempt}")
-        if not ask_approval(p):
-            print(f"{p.package}: not approved, nothing done.")
-            continue
-        r = open_pr(p, client, store)
-        print(f"{p.package}: {r.outcome} -> {r.pr_url}")
+
+def _ask(payload: dict) -> dict | None:
+    """The human gate: y/N per proposal. None = no answer yet (run stays paused)."""
+    print(f"\n{payload['question']}")
+    answers = {}
+    for prop in payload["proposals"]:
+        print("\n--- Proposed upgrade PR ---")
+        if prop["attempt"] > 1 and prop.get("previous_pr"):
+            prev = prop["previous_pr"]
+            print(f"(re-run: previous PR #{prev['number']} was {'merged' if prev.get('merged_at') else prev['state']}, "
+                  f"but the file on the base branch still pins the vulnerable version -> new action, "
+                  f"attempt {prop['attempt']})")
+        print(prop["render"])
+        try:
+            answer = input("Open this PR? [y/N] ")
+        except EOFError:
+            return None
+        answers[prop["key"]] = answer.strip().lower() in {"y", "yes"}
+    return answers
+
+
+def _drive(graph, config, first_input) -> int:
+    """Run (or resume) until the graph finishes or waits for a human who is not there."""
+    from langgraph.types import Command
+
+    from .graph import pending_interrupt
+    thread = config["configurable"]["thread_id"]
+    if first_input is not None:
+        graph.invoke(first_input, config)
+    while (payload := pending_interrupt(graph, config)) is not None:
+        answers = _ask(payload)
+        if answers is None:
+            print(f"\nPaused at human_approval. Resume with: python -m triage resume --thread {thread}")
+            return 0
+        graph.invoke(Command(resume=answers), config)
+    values = graph.get_state(config).values
+    if "report_text" not in values:
+        print(f"error: no run found for thread {thread}", file=sys.stderr)
+        return 1
+    print(values["report_text"])
+    print(f"\n(thread {thread})")
+    return 0
+
+
+def _run(argv: list[str], resume: bool = False) -> int:
+    from datetime import datetime, timezone
+
+    from .graph import build_graph, sqlite_checkpointer
+
+    ap = argparse.ArgumentParser(prog=f"python -m triage {'resume' if resume else 'run'}",
+                                 description="Full agent run as a LangGraph graph (pauses for y/N approval).")
+    if not resume:
+        ap.add_argument("requirements", help="path to requirements.txt")
+        ap.add_argument("--repo", help="GitHub repo owner/name (without it: scan + risk only)")
+        ap.add_argument("--path", default="requirements.txt", help="dependency file path inside the repo")
+        ap.add_argument("--base", help="base branch (default: the repo's default branch)")
+    ap.add_argument("--thread", required=resume, help="thread id (resume a paused run with the same id)")
+    ap.add_argument("--db", default="triage.db", help="SQLite file: approved actions, CI history, LLM cache")
+    ap.add_argument("--checkpoints", default="checkpoints.db", help="SQLite file for LangGraph checkpoints")
+    ap.add_argument("--no-wait", action="store_true", help="observe CI once instead of waiting for a result")
+    ap.add_argument("--timeout", type=float, default=600, help="seconds to wait for CI at most")
+    ap.add_argument("--interval", type=float, default=15, help="seconds between CI polls")
+    args = ap.parse_args(argv)
+
+    thread = args.thread or f"triage-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
+    graph = build_graph(_runtime(args, wait=not args.no_wait), sqlite_checkpointer(args.checkpoints))
+    config = {"configurable": {"thread_id": thread}}
+    first = None if resume else {"requirements_path": args.requirements, "repo": args.repo,
+                                 "base": args.base, "path": args.path}
+    return _drive(graph, config, first)
+
+
+def _graph_doc(argv: list[str]) -> int:
+    from .graph import Runtime, build_graph, mermaid
+
+    out = Path(argv[0] if argv else "docs/graph.md")
+    g = build_graph(Runtime(store=None, cache=None))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        "# Agent graph (LangGraph)\n\n"
+        "Generated by `python -m triage graph`. `human_approval` pauses the run (interrupt) until a "
+        "human answers y/N; state is checkpointed in SQLite, so a paused run resumes by thread id. "
+        "`diagnose_failure` only runs when an upgrade PR's CI is failing.\n\n"
+        f"```mermaid\n{mermaid(g).strip()}\n```\n")
+    print(f"wrote {out}")
     return 0
 
 
@@ -110,6 +168,7 @@ def _status(argv: list[str]) -> int:
     ap.add_argument("--wait", action="store_true", help="poll until no PR has pending CI")
     ap.add_argument("--timeout", type=float, default=600, help="seconds to wait at most (with --wait)")
     ap.add_argument("--interval", type=float, default=15, help="seconds between polls (with --wait)")
+    ap.add_argument("--no-diagnose", action="store_true", help="skip the CI failure diagnosis")
     args = ap.parse_args(argv)
 
     _load_dotenv()
@@ -121,13 +180,26 @@ def _status(argv: list[str]) -> int:
     if not store.with_prs(args.repo):
         print(f"No upgrade PRs recorded for {args.repo} in {args.db}.")
         return 0
+    client = GitHubClient(token)
     try:
-        statuses, timed_out = watch(args.repo, GitHubClient(token), store, wait=args.wait,
+        statuses, timed_out = watch(args.repo, client, store, wait=args.wait,
                                     timeout=args.timeout, interval=args.interval)
     except GitHubError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-    print(render_table(statuses))
+    extra = {}
+    if not args.no_diagnose:
+        from .diagnose import diagnose_failure, render_diagnosis
+        from .llm import LLMCache
+        cache = LLMCache(args.db)
+        for st in statuses:
+            if st.pr_state == "open" and st.ci_status == "failing":
+                r = st.record
+                current = r.dependency_id.split("@", 1)[1].split("#", 1)[0]
+                extra[r.pr_number] = render_diagnosis(diagnose_failure(
+                    args.repo, r.pr_number, r.package or r.dependency_id, current, r.target_version,
+                    [c.__dict__ for c in st.checks], client, cache))
+    print(render_table(statuses, extra))
     if timed_out:
         print(f"\nTimed out after {args.timeout:.0f}s; pending CI is still pending (not passing).")
     return 0
@@ -137,6 +209,12 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["status"]:
         return _status(argv[1:])
+    if argv[:1] == ["run"]:
+        return _run(argv[1:])
+    if argv[:1] == ["resume"]:
+        return _run(argv[1:], resume=True)
+    if argv[:1] == ["graph"]:
+        return _graph_doc(argv[1:])
     ap = argparse.ArgumentParser(description="Scan a requirements.txt against OSV advisories.")
     ap.add_argument("requirements", help="path to requirements.txt")
     ap.add_argument("--json", action="store_true", help="print the full result as JSON (all evidence)")
@@ -144,12 +222,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--path", default="requirements.txt", help="dependency file path inside the repo")
     ap.add_argument("--base", help="base branch (default: the repo's default branch)")
     ap.add_argument("--db", default="triage.db", help="SQLite file recording approved actions")
-    ap.add_argument("--open-prs", action="store_true", help="propose upgrade PRs, each needs y/N approval")
+    ap.add_argument("--open-prs", action="store_true",
+                    help="full agent run (same as 'run'): risk, y/N approval, PRs, CI, diagnosis")
+    ap.add_argument("--thread", help="with --open-prs: thread id for the run")
+    ap.add_argument("--no-wait", action="store_true", help="with --open-prs: observe CI once")
     ap.add_argument("--explain", action="store_true",
                     help="add LLM explanations (LLM_PROVIDER, default groq); never affects decisions")
     args = ap.parse_args(argv)
     if args.open_prs and not args.repo:
         ap.error("--open-prs needs --repo owner/name")
+    if args.open_prs:
+        rest = [args.requirements, "--repo", args.repo, "--path", args.path, "--db", args.db]
+        rest += (["--base", args.base] if args.base else []) + (["--thread", args.thread] if args.thread else [])
+        return _run(rest + (["--no-wait"] if args.no_wait else []))
 
     with open(args.requirements) as f:
         result = scan(f.read())
@@ -158,25 +243,9 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result.to_dict(), indent=2, default=str))
         return 0
 
-    print(f"\n{'PACKAGE':<14}{'CURRENT':<10}{'TARGET':<10}{'STATUS':<11}REASON")
-    for p in result.plans:
-        print(f"{p.package:<14}{p.current_version or '-':<10}{p.target_version or '-':<10}"
-              f"{p.status.value:<11}{p.reason}")
-    print("\nPer-advisory decisions (PyPI):")
-    for m in result.matches:
-        if m.queried_ecosystem == "PyPI":
-            print(f"  [{m.decision.value:<12}] {m.dependency_id:<28} {m.advisory_id:<22} {m.reason}")
-    collisions = [m for m in result.matches if m.queried_ecosystem != "PyPI"]
-    print("\nSame name in other ecosystems (TC2 - not this package, never upgraded):")
-    for m in collisions:
-        print(f"  {m.dependency_id:<28} {m.advisory_id:<22} {m.decision.value}: {m.reason}")
-    if not collisions:
-        print("  none found")
-    for w in result.warnings:
-        print(f"  warning: {w}")
-    explanations = _explanations(args, result) if args.explain else None
-    if args.open_prs:
-        return _open_prs(args, result, explanations)
+    print(format_scan(result.plans, result.matches, result.warnings))
+    if args.explain:
+        _explanations(args, result)
     return 0
 
 

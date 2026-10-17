@@ -12,15 +12,14 @@ from dataclasses import dataclass
 
 from packaging.version import Version
 
-from .llm import LLMCache, LLMError, LLMProvider, get_provider
+from .llm import LLMCache, LLMProvider, ask_json
 from .models import AdvisoryMatch, Decision, UpgradePlan
 from .scanner import count_vulnerabilities
 
 SYSTEM = (
     "You explain dependency security upgrades to a developer team. Use ONLY the facts given in "
-    "the JSON. Do not invent advisories, versions, CVEs or test results. Do not say the issue is "
-    "fixed or deployed: the upgrade PR's CI result and a human merge decide that. Plain English, "
-    "short sentences, no markdown."
+    "the JSON. Do not invent advisories, versions, CVEs or test results. Whether the upgrade works "
+    "is decided later by the PR's CI result and a human merge. Plain English, short sentences, no markdown."
 )
 SCHEMA = {
     "type": "object",
@@ -72,29 +71,19 @@ def facts(plan: UpgradePlan, matches: list[AdvisoryMatch]) -> dict:
 def explain(plan: UpgradePlan, matches: list[AdvisoryMatch], cache: LLMCache,
             provider: LLMProvider | None | str = "env") -> Explanation:
     """provider="env" reads LLM_PROVIDER; pass a provider (or None to disable) in tests."""
-    subject = f"{plan.dependency_id}->{plan.target_version}"
-    try:
-        llm = get_provider() if provider == "env" else provider
-    except LLMError as e:
-        cache.log("-", subject, "unavailable", e.reason)
-        return Explanation("unavailable", detail=e.reason)
-    if llm is None:
-        return Explanation("disabled")
+    r = ask_json(provider, cache, f"explain:{plan.dependency_id}->{plan.target_version}", SYSTEM,
+                 json.dumps(facts(plan, matches), sort_keys=True), SCHEMA, "upgrade_explanation",
+                 claim_fields=tuple(SCHEMA["required"]))
+    if not r.available:
+        return Explanation(r.status, detail=r.detail)
+    return Explanation(r.status, **{k: r.data[k].strip() for k in SCHEMA["required"]}, detail=r.detail)
 
-    user = json.dumps(facts(plan, matches), sort_keys=True)
-    key = cache.key(llm.name, llm.model, SYSTEM, user, SCHEMA)
-    if (hit := cache.get(key)) is not None:
-        cache.log(key, subject, "cached")
-        return Explanation("cached", **hit, detail=f"{llm.name}/{llm.model} (cached)")
-    try:
-        out = llm.complete_json(SYSTEM, user, SCHEMA, "upgrade_explanation")
-    except LLMError as e:
-        cache.log(key, subject, "unavailable", e.reason)
-        return Explanation("unavailable", detail=e.reason)
-    except Exception as e:                     # never let the optional layer break the run
-        cache.log(key, subject, "unavailable", type(e).__name__)
-        return Explanation("unavailable", detail=type(e).__name__)
-    out = {k: out[k].strip() for k in SCHEMA["required"]}
-    cache.put(key, llm.name, llm.model, out)
-    cache.log(key, subject, "ok")
-    return Explanation("ok", **out, detail=f"{llm.name}/{llm.model}")
+
+def with_explanation(body: str, e: Explanation | None) -> str:
+    """PR body + a clearly labelled LLM section (or a note that the LLM was unavailable)."""
+    if e is None or e.status == "disabled":
+        return body
+    text = e.render() if e.available else f"LLM explanation unavailable ({e.detail})."
+    return (body + "\n\n### Explanation (LLM, advisory only)\n"
+            "_Written by an LLM from the facts above; it did not choose the version or open this PR._\n\n"
+            + text.replace("\n", "\n\n"))

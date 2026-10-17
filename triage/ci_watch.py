@@ -11,7 +11,7 @@ history of pending -> passing/failing stays visible.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -49,6 +49,17 @@ class PrStatus:
     outcome: str
     checks: list[Check] = field(default_factory=list)
     observed_at: str = ""
+
+    @property
+    def pr_number(self) -> int:
+        return self.record.pr_number
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "PrStatus":
+        return cls(**{**d, "record": ActionRecord(**d["record"]), "checks": [Check(**c) for c in d["checks"]]})
 
     @property
     def unique_vulnerabilities(self) -> int:
@@ -108,16 +119,20 @@ def observe(record: ActionRecord, client: GitHubClient, store: ActionStore) -> P
 def watch(repo: str, client: GitHubClient, store: ActionStore, wait: bool = False,
           timeout: float = 600, interval: float = 15,
           sleep: Callable[[float], None] = time.sleep,
-          clock: Callable[[], float] = time.monotonic) -> tuple[list[PrStatus], bool]:
+          clock: Callable[[], float] = time.monotonic,
+          just_opened: frozenset[int] = frozenset()) -> tuple[list[PrStatus], bool]:
     """Observe every recorded PR. With wait, poll until none is pending or timeout.
 
     Returns (statuses, timed_out). Only PRs still open with pending CI are re-polled.
+    just_opened: PR numbers created moments ago - "no checks yet" means CI has not
+    started, so they are polled like pending ones instead of being reported "unknown".
     """
     records = store.with_prs(repo)
     latest = {r.pr_number: observe(r, client, store) for r in records}
     deadline = clock() + timeout
     while wait:
-        pending = [s for s in latest.values() if s.pr_state == "open" and s.ci_status == "pending"]
+        pending = [s for s in latest.values() if s.pr_state == "open" and
+                   (s.ci_status == "pending" or (s.pr_number in just_opened and not s.checks))]
         if not pending:
             break
         if clock() + interval > deadline:
@@ -128,7 +143,8 @@ def watch(repo: str, client: GitHubClient, store: ActionStore, wait: bool = Fals
     return list(latest.values()), False
 
 
-def render_table(statuses: list[PrStatus]) -> str:
+def render_table(statuses: list[PrStatus], extra: dict[int, list[str]] | None = None) -> str:
+    """extra: more evidence lines per PR number (e.g. a CI failure diagnosis)."""
     rows = [("PACKAGE", "ADVISORIES", "PR", "PR STATE", "CI", "OUTCOME")]
     for s in statuses:
         r = s.record
@@ -152,4 +168,6 @@ def render_table(statuses: list[PrStatus]) -> str:
             lines.append("    no check runs or commit statuses on this commit")
         if s.merged_at:
             lines.append(f"    merged_at {s.merged_at}; no deployment was observed")
+        for line in (extra or {}).get(r.pr_number, []):
+            lines.append(f"    {line}")
     return "\n".join(lines)

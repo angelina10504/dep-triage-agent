@@ -9,7 +9,7 @@ Checks a repo's dependencies against public security advisories (OSV), opens upg
 - [x] Step 2 — Scanner core: parse `requirements.txt`, fetch OSV advisories, deterministic version-range matching with evidence
 - [x] Step 3 — Upgrade PR action (human approval, no duplicate PRs on retry)
 - [x] Step 4 — CI watcher (passing / failing / pending; merged is not deployed)
-- [ ] Step 5 — LangGraph orchestration + LLM explanations
+- [x] Step 5 — LangGraph orchestration + LLM explanations, upgrade risk, CI failure diagnosis
 - [ ] Step 6 — SQLite store + web triage table
 - [ ] Step 7 — Deploy + run the 4 official test cases
 
@@ -25,6 +25,9 @@ python -m triage path/to/requirements.txt --json   # full evidence
 python -m triage path/to/requirements.txt --repo owner/name --open-prs
 # PR + CI triage table; --wait polls until no CI is pending
 python -m triage status --repo owner/name --wait
+# full agent run as a LangGraph graph: pauses for y/N, resumable (see docs/graph.md)
+python -m triage run path/to/requirements.txt --repo owner/name
+python -m triage resume --thread <id>
 # add plain-language LLM explanations (Groq by default, see .env.example); never changes a decision
 python -m triage path/to/requirements.txt --explain
 ```
