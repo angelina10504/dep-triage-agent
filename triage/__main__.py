@@ -26,7 +26,37 @@ def _load_dotenv(path: str = ".env") -> None:
             os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 
-def _open_prs(args, result) -> int:
+def _explanations(args, result) -> dict:
+    """Optional LLM explanations per upgrade plan; failures are recorded, never raised."""
+    from .explain import explain
+    from .llm import LLMCache
+
+    _load_dotenv()
+    cache = LLMCache(args.db)
+    out = {p.dependency_id: explain(p, result.matches, cache)
+           for p in result.plans if p.status == PlanStatus.UPGRADE}
+    print("\nExplanations (LLM - advisory text only, not used for any decision):")
+    for p in result.plans:
+        if p.dependency_id in out:
+            e = out[p.dependency_id]
+            print(f"  {p.package} -> {p.target_version} [{e.detail or e.status}]")
+            for line in e.render().splitlines():
+                print(f"    {line}")
+    if not out:
+        print("  no upgrade plans to explain")
+    return out
+
+
+def _with_explanation(body: str, e) -> str:
+    if e is None:
+        return body
+    text = e.render() if e.available else f"LLM explanation unavailable ({e.detail})."
+    return (body + "\n\n### Explanation (LLM, advisory only)\n"
+            "_Written by an LLM from the facts above; it did not choose the version or open this PR._\n\n"
+            + text.replace("\n", "\n\n"))
+
+
+def _open_prs(args, result, explanations: dict | None = None) -> int:
     from .github_pr import GitHubClient, ask_approval, build_proposal, open_pr, resolve
     from .store import ActionStore
 
@@ -46,6 +76,8 @@ def _open_prs(args, result) -> int:
 
     for plan in upgrades:
         p = build_proposal(plan, deps[plan.dependency_id], result.matches, args.repo, base, args.path)
+        if explanations and (e := explanations.get(p.dependency_id)) and e.status != "disabled":
+            p.body = _with_explanation(p.body, e)
         store.fill_advisories(p.dependency_id, p.target_version, p.package, p.advisories)
         res = resolve(p, client, store)
         if res.action == "reuse":
@@ -113,6 +145,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--base", help="base branch (default: the repo's default branch)")
     ap.add_argument("--db", default="triage.db", help="SQLite file recording approved actions")
     ap.add_argument("--open-prs", action="store_true", help="propose upgrade PRs, each needs y/N approval")
+    ap.add_argument("--explain", action="store_true",
+                    help="add LLM explanations (LLM_PROVIDER, default groq); never affects decisions")
     args = ap.parse_args(argv)
     if args.open_prs and not args.repo:
         ap.error("--open-prs needs --repo owner/name")
@@ -140,8 +174,9 @@ def main(argv: list[str] | None = None) -> int:
         print("  none found")
     for w in result.warnings:
         print(f"  warning: {w}")
+    explanations = _explanations(args, result) if args.explain else None
     if args.open_prs:
-        return _open_prs(args, result)
+        return _open_prs(args, result, explanations)
     return 0
 
 

@@ -25,6 +25,8 @@ python -m triage path/to/requirements.txt --json   # full evidence
 python -m triage path/to/requirements.txt --repo owner/name --open-prs
 # PR + CI triage table; --wait polls until no CI is pending
 python -m triage status --repo owner/name --wait
+# add plain-language LLM explanations (Groq by default, see .env.example); never changes a decision
+python -m triage path/to/requirements.txt --explain
 ```
 
 ## Decision rules (no LLM)

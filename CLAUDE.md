@@ -27,6 +27,6 @@ Rubric: problem fit 20, agentic capability 25, technical 20, innovation 15, UX 1
 - [x] Step 2 scanner core: parser.py, osv.py (OSV query by name, no version), matcher.py, scanner.py, CLI `python -m triage <requirements.txt> [--json]`, 17 unit tests
 - [x] Step 3 upgrade PR action (triage/github_pr.py, triage/store.py): y/N approval gate, idempotent via SQLite + existing PR/branch checks. Verified live: PR #1 requests 2.28.0->2.33.0 CI 2/2 green (TC1), PR #2 Werkzeug 2.2.2->3.1.9 CI 1/2 red (TC3)
 - [x] Step 4 CI watcher (triage/ci_watch.py, `python -m triage status --repo R [--wait]`): check runs + commit statuses, append-only ci_observations history. Verified live: PR #1 passing (TC1), PR #2 "PR failing, NOT fixed" (TC3). TC4 (merge) not yet demoed
-- [ ] Step 5 LangGraph orchestration + LLM explanations
+- [ ] Step 5 LangGraph orchestration + LLM explanations. DONE: LLM explanations (triage/llm.py provider interface via LLM_PROVIDER, Groq openai/gpt-oss-20b strict JSON schema, SQLite cache by input hash, 429/5xx retry, "LLM unavailable" on failure; triage/explain.py; CLI --explain). TODO: LangGraph orchestration
 - [ ] Step 6 SQLite store + simple web triage table with approve buttons
 - [ ] Step 7 deploy (free host) + 4 labelled TC runs + presentation
