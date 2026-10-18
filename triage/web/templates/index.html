@@ -4,11 +4,10 @@
   <div>
     <h1>Triage table</h1>
     <p class="muted">
-      {% if latest %}Latest run <a href="/approvals/{{ latest.thread_id }}">{{ latest.thread_id }}</a>
-        ({{ latest.status | replace('_', ' ') }}, {{ latest.updated_at }}{% if latest.dry_run %}, dry run{% endif %}).
-        {% if latest.snapshot.repo_summary and latest.snapshot.repo_summary.python %}Repo Python {{ latest.snapshot.repo_summary.python }}
-        ({{ latest.snapshot.repo_summary.python_source }}).{% endif %}
-      {% else %}No scan run from the web yet; showing recorded PRs only.{% endif %}
+      {% if latest %}{% set rs = latest.data.repo_summary or {} %}Showing stored run <code>{{ latest.thread_id }}</code>
+        ({{ 'complete' if latest.stage == 'complete' else 'plan + risk stored, actions pending' }}, {{ latest.updated_at }}{% if latest.dry_run %}, dry run{% endif %}).
+        {% if rs.python %}Repo Python {{ rs.python }} ({{ rs.python_source }}).{% endif %}
+      {% else %}No stored scan run yet; showing recorded PRs only. Run a scan once (web or CLI) to store one.{% endif %}
     </p>
   </div>
   <div class="actions">
@@ -44,7 +43,7 @@
       <td><b>{{ r.package }}</b> <span class="muted">{{ r.current }}{% if r.target %} &rarr; {{ r.target }}{% endif %}</span></td>
       <td>{{ r.advisory_summary }}</td>
       <td>{% if r.risk %}<span class="risk {{ r.risk.breaking_risk }}">{{ r.risk.breaking_risk }}</span>{% elif r.plan_status == 'upgrade' %}<span class="muted">not assessed</span>{% else %}<span class="muted">-</span>{% endif %}</td>
-      <td>{% if r.pr %}<a href="{{ r.pr.url | safe_url }}" target="_blank" rel="noopener noreferrer">#{{ r.pr.number }}</a>{% if r.pr.attempt > 1 %} <span class="muted small">attempt {{ r.pr.attempt }}</span>{% endif %}{% else %}<span class="muted">-</span>{% endif %}</td>
+      <td>{% if r.pr %}<a href="{{ r.pr.url | safe_url }}" target="_blank" rel="noopener noreferrer">#{{ r.pr.number }}</a>{% if r.pr.attempt > 1 %} <span class="muted small">attempt {{ r.pr.attempt }}</span>{% endif %}{% if r.earlier %} <span class="muted small">+{{ r.earlier|length }} earlier</span>{% endif %}{% else %}<span class="muted">-</span>{% endif %}</td>
       <td>{% if r.obs %}<span class="pill {{ status_class(r.obs.pr_state, None) if r.obs.pr_state != 'open' else 'open' }}">{{ r.obs.pr_state }}</span>{% else %}-{% endif %}</td>
       <td>{% if r.obs %}<span class="pill {{ r.obs.ci_status }}">{{ r.obs.ci_status }}</span>{% else %}-{% endif %}</td>
       <td class="outcome">{{ r.outcome }}</td>

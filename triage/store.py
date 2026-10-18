@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS actions (
     updated_at     TEXT NOT NULL,
     package        TEXT,
     advisories     TEXT,               -- JSON [{"id": ..., "aliases": [...]}]
+    risk           TEXT,               -- JSON: upgrade risk shown at approval time
     PRIMARY KEY (dependency_id, target_version, attempt)
 );
 CREATE TABLE IF NOT EXISTS ci_observations (
@@ -48,9 +49,20 @@ CREATE TABLE IF NOT EXISTS ci_observations (
     checks         TEXT NOT NULL,      -- JSON evidence [{"name", "kind", "state", "url"}]
     observed_at    TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS scan_runs (
+    thread_id      TEXT PRIMARY KEY,
+    repo           TEXT,
+    source         TEXT NOT NULL,      -- dependency file path (in the repo, or local)
+    dry_run        INTEGER NOT NULL DEFAULT 0,
+    stage          TEXT NOT NULL,      -- assessed (plan + risk stored) | complete (actions + CI too)
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL,
+    data           TEXT NOT NULL       -- JSON: plans, matches (every per-advisory decision, incl.
+                                       -- cross-ecosystem exclusions), risks (citations + repo usage)...
+);
 """
 # Columns added after the first release of the actions table.
-_MIGRATIONS = {"package": "TEXT", "advisories": "TEXT"}
+_MIGRATIONS = {"package": "TEXT", "advisories": "TEXT", "risk": "TEXT"}
 _ACTION_COLS = ("dependency_id, target_version, repo, branch, status, approved_by, approved_at,"
                 " pr_number, pr_url, updated_at, package, advisories")
 
@@ -74,11 +86,13 @@ class ActionRecord:
     attempt: int = 1
     package: str | None = None
     advisories: list[dict] = field(default_factory=list)
+    risk: dict | None = None           # upgrade risk as shown to the approver
 
 
 def _record(row: sqlite3.Row) -> ActionRecord:
     d = dict(row)
     d["advisories"] = json.loads(d["advisories"]) if d.get("advisories") else []
+    d["risk"] = json.loads(d["risk"]) if d.get("risk") else None
     return ActionRecord(**d)
 
 
@@ -139,6 +153,31 @@ class ActionStore:
             (package, json.dumps(advisories), dependency_id, target_version),
         )
         self.db.commit()
+
+    def set_risk(self, dependency_id: str, target_version: str, attempt: int, risk: dict) -> None:
+        """The risk shown when this attempt was approved; written once, never overwritten."""
+        self.db.execute(
+            "UPDATE actions SET risk = COALESCE(risk, ?) WHERE dependency_id = ? AND target_version = ? AND attempt = ?",
+            (json.dumps(risk), dependency_id, target_version, attempt))
+        self.db.commit()
+
+    # ---------- scan runs (survive restarts; the web UI shows the latest) ----------
+    def save_run(self, thread_id: str, data: dict, *, repo: str | None, source: str, dry_run: bool,
+                 stage: str) -> None:
+        now = _now()
+        self.db.execute(
+            "INSERT INTO scan_runs (thread_id, repo, source, dry_run, stage, created_at, updated_at, data)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(thread_id) DO UPDATE SET"
+            " stage = excluded.stage, updated_at = excluded.updated_at, data = excluded.data",
+            (thread_id, repo, source, int(dry_run), stage, now, now, json.dumps(data, default=str)))
+        self.db.commit()
+
+    def latest_run(self, repo: str | None = None) -> dict | None:
+        q, args = "SELECT * FROM scan_runs", ()
+        if repo:
+            q, args = q + " WHERE repo = ?", (repo,)
+        row = self.db.execute(q + " ORDER BY updated_at DESC, rowid DESC LIMIT 1", args).fetchone()
+        return {**dict(row), "data": json.loads(row["data"])} if row else None
 
     def record_pr(self, dependency_id: str, target_version: str, pr_number: int, pr_url: str,
                   attempt: int = 1) -> ActionRecord:

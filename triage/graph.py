@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, TypedDict
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
@@ -116,6 +117,20 @@ def _key(proposal: dict) -> str:
     return f"{proposal['dependency_id']}|{proposal['branch']}"
 
 
+# What a stored scan run keeps (scan_runs.data): enough to show the table and TC1-TC4 after a restart.
+RUN_KEYS = ("dependencies", "plans", "matches", "warnings", "risks", "explanations", "repo_summary", "base",
+            "prs", "ci", "ci_timed_out", "diagnoses", "notice")
+
+
+def _persist(rt: Runtime, s: dict, config: RunnableConfig | None, stage: str) -> None:
+    thread = ((config or {}).get("configurable") or {}).get("thread_id")
+    if rt.store is None or not thread:
+        return
+    rt.store.save_run(thread, {k: s.get(k) for k in RUN_KEYS if s.get(k) is not None}, repo=s.get("repo"),
+                      source=s.get("path") or s.get("requirements_path") or "requirements.txt",
+                      dry_run=bool(s.get("dry_run")), stage=stage)
+
+
 def build_graph(rt: Runtime, checkpointer=None):
     def collect(s: TriageState):
         text = s.get("requirements_text") or Path(s["requirements_path"]).read_text()
@@ -131,7 +146,12 @@ def build_graph(rt: Runtime, checkpointer=None):
     def plan(s: TriageState):
         return {"plans": [_plain(p) for p in plan_all(_deps(s), s["fetched"], _matches(s))]}
 
-    def assess(s: TriageState):
+    def assess(s: TriageState, config: RunnableConfig):
+        out = _assess(s)
+        _persist(rt, {**s, **out}, config, "assessed")      # stored before the run pauses for approval
+        return out
+
+    def _assess(s: TriageState):
         deps = {d.id: d for d in _deps(s)}
         upgrades = [p for p in _plans(s) if p.status == PlanStatus.UPGRADE]
         risks, explanations, out = {}, {}, {}
@@ -224,6 +244,9 @@ def build_graph(rt: Runtime, checkpointer=None):
                 prs.append({**row, "outcome": "dry run - would propose a new PR"})
             elif s.get("approvals", {}).get(_key(r["proposal"])) is True:
                 res = open_pr(Proposal(**r["proposal"]), rt.client(), rt.store, rt.approved_by)
+                if (risk := s.get("risks", {}).get(r["dependency_id"])):    # the risk the approver saw
+                    rt.store.set_risk(r["dependency_id"], r["proposal"]["target_version"],
+                                      r["proposal"]["attempt"], risk)
                 prs.append({**row, "outcome": res.outcome, "pr_number": res.pr_number, "pr_url": res.pr_url})
             else:
                 prs.append({**row, "outcome": "not approved - nothing done"})
@@ -257,7 +280,8 @@ def build_graph(rt: Runtime, checkpointer=None):
                     rec["target_version"], c["checks"], rt.client(), rt.cache, rt.llm)
         return {"diagnoses": out}
 
-    def report(s: TriageState):
+    def report(s: TriageState, config: RunnableConfig):
+        _persist(rt, s, config, "complete")
         return {"report_text": _report(s, verbose=False), "report_verbose": _report(s, verbose=True)}
 
     def _report(s: TriageState, verbose: bool) -> str:

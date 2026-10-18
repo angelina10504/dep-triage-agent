@@ -1,0 +1,16 @@
+{# CI evidence for one attempt `at` #}
+{% if at.obs %}
+<p class="small muted">CI @ {{ at.obs.head_sha[:7] }}, observed {{ at.obs.observed_at }}; intended: CI passing, observed: {{ at.obs.ci_status }}</p>
+{% if at.obs.checks %}
+<ul>
+  {% for c in at.obs.checks %}<li><span class="pill {{ status_class(None, 'passing' if c.state in ('success','neutral','skipped') else 'failing' if c.state in ('failure','cancelled','timed_out','error') else 'pending') }}">{{ c.state }}</span>
+    {{ c.kind }} <a href="{{ c.url | safe_url }}" target="_blank" rel="noopener noreferrer">{{ c.name }}</a></li>{% endfor %}
+</ul>
+{% else %}<p class="muted small">No check runs or commit statuses on this commit.</p>{% endif %}
+{% if at.obs.merged_at %}<p class="small">Merged at {{ at.obs.merged_at }}. No deployment was observed.</p>{% endif %}
+{% if at.history | length > 1 %}
+<details><summary class="small">{{ at.history | length }} observations (append-only history)</summary>
+  <ul class="small">{% for o in at.history %}<li>{{ o.observed_at }}: {{ o.pr_state }}, CI {{ o.ci_status }} &rarr; {{ o.outcome }}</li>{% endfor %}</ul>
+</details>
+{% endif %}
+{% else %}<p class="muted small">CI not observed yet.</p>{% endif %}

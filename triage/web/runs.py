@@ -117,14 +117,6 @@ class RunStore:
     def runs(self, limit: int = 20) -> list[dict]:
         return [_run(r) for r in self._q("SELECT * FROM web_runs ORDER BY started_at DESC, rowid DESC LIMIT ?", (limit,))]
 
-    def latest_snapshot(self) -> dict | None:
-        """The newest run that got as far as a plan (paused or finished)."""
-        for r in self._q("SELECT * FROM web_runs WHERE snapshot IS NOT NULL ORDER BY updated_at DESC, rowid DESC"):
-            run = _run(r)
-            if run["snapshot"].get("plans") is not None:
-                return run
-        return None
-
     def awaiting(self) -> list[dict]:
         return [_run(r) for r in self._q("SELECT * FROM web_runs WHERE status = 'awaiting_approval' ORDER BY started_at")]
 

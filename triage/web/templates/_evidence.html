@@ -41,36 +41,34 @@
 
   {% if r.risk %}
   <div class="ev-block">
-    <h4>Upgrade risk: <span class="risk {{ r.risk.breaking_risk }}">{{ r.risk.breaking_risk }}</span></h4>
+    <h4>Upgrade risk: <span class="risk {{ r.risk.breaking_risk }}">{{ r.risk.breaking_risk }}</span>
+      <span class="muted small">({{ r.risk_source }})</span></h4>
     {% include "_risk_detail.html" %}
   </div>
   {% endif %}
 
-  {% if r.pr %}
+  {% if r.pr %}{% set at = r.pr %}
   <div class="ev-block">
-    <h4>PR</h4>
-    <p><a href="{{ r.pr.url | safe_url }}" target="_blank" rel="noopener noreferrer">PR #{{ r.pr.number }}</a>
-      on <code>{{ r.pr.branch }}</code> (attempt {{ r.pr.attempt }}).
-      Approved by <b>{{ r.decision.decided_by if r.decision else r.pr.approved_by }}</b>
-      at {{ r.decision.decided_at if r.decision else r.pr.approved_at }}{% if r.decision and r.decision.risk_shown_at %}, after the risk was shown at {{ r.decision.risk_shown_at }}{% endif %}.</p>
+    <h4>Latest attempt: PR #{{ at.number }}</h4>
+    <p><a href="{{ at.url | safe_url }}" target="_blank" rel="noopener noreferrer">PR #{{ at.number }}</a>
+      {{ at.current }} &rarr; {{ at.target }} on <code>{{ at.branch }}</code> (attempt {{ at.attempt }}).
+      Approved by <b>{{ at.decision.decided_by if at.decision else at.approved_by }}</b>
+      at {{ at.decision.decided_at if at.decision else at.approved_at }}{% if at.decision and at.decision.risk_shown_at %}, after the risk was shown at {{ at.decision.risk_shown_at }}{% endif %}.
+      {% if at.risk %}Risk at approval: <span class="risk {{ at.risk.breaking_risk }}">{{ at.risk.breaking_risk }}</span>.{% endif %}</p>
+    {% include "_checks.html" %}
   </div>
   {% endif %}
 
-  {% if r.obs %}
+  {% if r.earlier %}
   <div class="ev-block">
-    <h4>CI checks @ {{ r.obs.head_sha[:7] }} <span class="muted small">(observed {{ r.obs.observed_at }}; intended: CI passing, observed: {{ r.obs.ci_status }})</span></h4>
-    {% if r.obs.checks %}
-    <ul>
-      {% for c in r.obs.checks %}<li><span class="pill {{ status_class(None, 'passing' if c.state in ('success','neutral','skipped') else 'failing' if c.state in ('failure','cancelled','timed_out','error') else 'pending') }}">{{ c.state }}</span>
-        {{ c.kind }} <a href="{{ c.url | safe_url }}" target="_blank" rel="noopener noreferrer">{{ c.name }}</a></li>{% endfor %}
-    </ul>
-    {% else %}<p class="muted">No check runs or commit statuses on this commit.</p>{% endif %}
-    {% if r.obs.merged_at %}<p>Merged at {{ r.obs.merged_at }}. No deployment was observed.</p>{% endif %}
-    {% if r.history | length > 1 %}
-    <details><summary>{{ r.history | length }} observations (append-only history)</summary>
-      <ul class="small">{% for o in r.history %}<li>{{ o.observed_at }}: {{ o.pr_state }}, CI {{ o.ci_status }} &rarr; {{ o.outcome }}</li>{% endfor %}</ul>
-    </details>
-    {% endif %}
+    <h4>Attempt history ({{ r.earlier | length }} earlier)</h4>
+    {% for at in r.earlier %}
+      <p><span class="pill {{ at.css }}">{{ at.obs.pr_state if at.obs else 'not observed' }}</span>
+        <a href="{{ at.url | safe_url }}" target="_blank" rel="noopener noreferrer">PR #{{ at.number }}</a>
+        attempt {{ at.attempt }}, {{ at.current }} &rarr; {{ at.target }}, approved by {{ at.approved_by }} at {{ at.approved_at }}:
+        <b>{{ at.outcome }}</b>{% if at.risk %}; risk at approval <span class="risk {{ at.risk.breaking_risk }}">{{ at.risk.breaking_risk }}</span>{% endif %}</p>
+      {% include "_checks.html" %}
+    {% endfor %}
   </div>
   {% endif %}
 

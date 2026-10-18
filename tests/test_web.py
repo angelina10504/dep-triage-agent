@@ -263,3 +263,122 @@ def test_only_one_job_at_a_time(tmp_path):
             break
         threading.Event().wait(0.05)
     assert runner.submit("refresh", None, "b", lambda log: None)
+
+
+# ---------------------------------------------------------------- stored runs, risk on PRs, grouping
+
+def cli_run(db, cp, gh, thread="cli-1"):
+    """A graph run started outside the web UI (like `python -m triage run`), paused at approval."""
+    from triage.graph import build_graph, sqlite_checkpointer
+    rt = Runtime(store=ActionStore(db), cache=LLMCache(db), github=lambda: GitHubClient("t", session=gh),
+                 fetch=fetch, other_ecosystems=("npm",), notes=notes, llm=FakeLLM(), wait=False)
+    from tests.test_github_pr import REQS
+    g = build_graph(rt, sqlite_checkpointer(cp))
+    cfg = {"configurable": {"thread_id": thread}}
+    g.invoke({"requirements_text": REQS, "repo": REPO, "path": "requirements.txt"}, cfg)
+    return g, cfg
+
+
+def test_scan_results_are_stored_and_survive_a_restart(web, tmp_path):
+    client, gh, db, cfg = web
+    cli_run(db, str(tmp_path / "cli.db"), gh)                         # no web scan at all
+    run = ActionStore(db).latest_run(REPO)
+    assert run["thread_id"] == "cli-1" and run["stage"] == "assessed"
+    data = run["data"]
+    assert {p["package"] for p in data["plans"]} == {"requests", "Jinja2", "MarkupSafe"}
+    assert any(m["queried_ecosystem"] == "npm" and m["decision"] == "excluded" for m in data["matches"])
+    req_risk = next(r for r in data["risks"].values() if r["package"] == "requests")
+    assert req_risk["breaking_risk"] == "high" and req_risk["usages"][0]["path"] == "app.py"
+    assert req_risk["breaking_changes"][0]["source_url"].startswith("https://")
+
+    restarted = TestClient(create_app(cfg))                             # new process, same triage.db
+    page = restarted.get("/").text
+    assert "Showing stored run <code>cli-1</code>" in page
+    assert 'class="risk high"' in page and "not assessed" not in page and "app.py:1" in page
+    assert badges(restarted.get("/test-cases").text)["TC2"] == "PASS"
+
+
+def test_tc2_card_names_the_other_ecosystem_package(web, tmp_path):
+    client, gh, db, _ = web
+    cli_run(db, str(tmp_path / "cli.db"), gh)
+    html = client.get("/test-cases").text
+    assert "MarkupSafe==2.0.1 (PyPI); advisory GHSA-NPM-MARKUPSAFE is for npm/markupsafe" in html
+    assert "From stored run cli-1" in html and "no PR" in html
+
+
+def test_pr_record_keeps_the_risk_shown_at_approval(web):
+    client, gh, db, _ = web
+    login(client)
+    post(client, "/scan")
+    run = awaiting(db)
+    t, i, j = run["thread_id"], idx_of(run, "requests"), idx_of(run, "Jinja2")
+    client.get(f"/approvals/{t}/{i}/risk")
+    post(client, f"/approvals/{t}/{i}/approve")
+    post(client, f"/approvals/{t}/{j}/reject")
+    rec = ActionStore(db).with_prs(REPO)[0]
+    assert rec.risk["breaking_risk"] == "high" and rec.risk["usages"]
+
+    store = ActionStore(db)                                              # without any stored run...
+    store.db.execute("DELETE FROM scan_runs")
+    store.db.commit()
+    page = client.get("/").text                                          # ...the PR still shows its risk
+    assert 'class="risk high"' in page and "stored with PR #1 at approval" in page
+
+
+def seed_two_attempts(db):
+    """requests: attempt 1 = PR #1 merged; attempt 2 = PR #3 open, CI passing (after a demo reset)."""
+    s = ActionStore(db)
+    dep = "PyPI:requests@2.19.0#L1"
+    for attempt, pr, at in ((1, 1, "2026-10-17T10:00:00+00:00"), (2, 3, "2026-10-17T20:00:00+00:00")):
+        s.record_approval(dep, "2.32.4", REPO, f"triage/requests-2.32.4{'-2' if attempt > 1 else ''}", "alice",
+                          "requests", [{"id": "GHSA-TEST-REQ", "aliases": []}], attempt)
+        s.db.execute("UPDATE actions SET approved_at = ? WHERE attempt = ?", (at, attempt))
+        s.record_pr(dep, "2.32.4", pr, f"https://github.com/{REPO}/pull/{pr}", attempt)
+    s.add_observation(dependency_id=dep, target_version="2.32.4", repo=REPO, pr_number=1, pr_state="merged",
+                      merged_at="2026-10-17T12:00:00Z", head_sha="aaa", ci_status="passing",
+                      outcome="merged, NOT deployed (deployment not verified)", checks=[], observed_at=T)
+    s.add_observation(dependency_id=dep, target_version="2.32.4", repo=REPO, pr_number=3, pr_state="open",
+                      merged_at=None, head_sha="bbb", ci_status="passing",
+                      outcome="PR open, CI passing (awaiting human merge)", checks=[], observed_at=T)
+
+
+def test_one_row_per_package_latest_attempt_first(web):
+    from triage.web.views import build_rows
+    client, gh, db, _ = web
+    seed_two_attempts(db)
+    rows, _ = build_rows(db, REPO)
+    assert [r.package for r in rows] == ["requests"]
+    assert rows[0].pr.number == 3 and [a.number for a in rows[0].earlier] == [1]
+    page = client.get("/").text
+    assert page.count('<tr class="row ') == 1 and 'class="row passing"' in page
+    assert "Attempt history (1 earlier)" in page and "+1 earlier" in page
+
+
+def test_tc1_uses_latest_attempt_and_points_to_tc4(web):
+    client, gh, db, _ = web
+    seed_two_attempts(db)
+    html = client.get("/test-cases").text
+    assert "PR #3 opened (attempt 2), CI passing" in html
+    assert "Earlier attempt: PR #1 (attempt 1), merged, see TC4" in html
+    tcs = badges(html)
+    assert tcs["TC1"] == "PASS" and tcs["TC4"] == "PASS"
+    assert "PR #1 requests 2.19.0 -&gt; 2.32.4 (attempt 1) merged" in html
+
+
+def test_existing_db_gets_the_risk_column(tmp_path):
+    import sqlite3
+    db = str(tmp_path / "old.db")
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE actions (dependency_id TEXT NOT NULL, target_version TEXT NOT NULL,"
+                " attempt INTEGER NOT NULL DEFAULT 1, repo TEXT NOT NULL, branch TEXT NOT NULL, status TEXT NOT NULL,"
+                " approved_by TEXT NOT NULL, approved_at TEXT NOT NULL, pr_number INTEGER, pr_url TEXT,"
+                " updated_at TEXT NOT NULL, package TEXT, advisories TEXT,"
+                " PRIMARY KEY (dependency_id, target_version, attempt))")
+    con.execute("INSERT INTO actions VALUES ('d', '2', 1, 'o/r', 'b', 'pr_opened', 'x', 't', 1, 'u', 't', 'p', NULL)")
+    con.commit()
+    con.close()
+    s = ActionStore(db)
+    assert s.with_prs()[0].risk is None
+    s.set_risk("d", "2", 1, {"breaking_risk": "low"})
+    s.set_risk("d", "2", 1, {"breaking_risk": "high"})                 # never overwritten
+    assert s.with_prs()[0].risk == {"breaking_risk": "low"}
