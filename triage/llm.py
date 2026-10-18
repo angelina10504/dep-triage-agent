@@ -16,7 +16,6 @@ import hashlib
 import json
 import os
 import re
-import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -178,8 +177,9 @@ class LLMCache:
     """Successful answers keyed by input hash; every call (hit, miss, failure) is logged."""
 
     def __init__(self, path: str = "triage.db"):
-        self.db = sqlite3.connect(path)
-        self.db.executescript("""
+        from .db import connect
+        self.db = connect(path)                      # SQLite file or postgres:// URL
+        self.db.script("""
             CREATE TABLE IF NOT EXISTS llm_cache (
                 key TEXT PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL,
                 prompt_version TEXT NOT NULL, response TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -199,7 +199,9 @@ class LLMCache:
         return json.loads(row[0]) if row else None
 
     def put(self, key: str, provider: str, model: str, response: dict) -> None:
-        self.db.execute("INSERT OR REPLACE INTO llm_cache VALUES (?, ?, ?, ?, ?, ?)",
+        self.db.execute("INSERT INTO llm_cache VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (key) DO UPDATE SET"
+                        " provider = excluded.provider, model = excluded.model, prompt_version = excluded.prompt_version,"
+                        " response = excluded.response, created_at = excluded.created_at",
                         (key, provider, model, PROMPT_VERSION, json.dumps(response), _now()))
         self.db.commit()
 
@@ -209,7 +211,7 @@ class LLMCache:
         self.db.commit()
 
     def events(self) -> list[tuple]:
-        return self.db.execute("SELECT subject, status, detail FROM llm_events ORDER BY id").fetchall()
+        return [tuple(r.values()) for r in self.db.execute("SELECT subject, status, detail FROM llm_events ORDER BY id")]
 
 
 @dataclass

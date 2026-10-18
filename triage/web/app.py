@@ -52,7 +52,9 @@ class WebConfig:
     @classmethod
     def from_env(cls, **kw) -> "WebConfig":
         e = os.environ.get
-        return cls(db=e("TRIAGE_DB", "triage.db"), checkpoints=e("TRIAGE_CHECKPOINTS", "checkpoints.db"),
+        url = e("DATABASE_URL")                  # deployed: one Postgres (e.g. Neon) for both
+        return cls(db=url or e("TRIAGE_DB", "triage.db"),
+                   checkpoints=e("TRIAGE_CHECKPOINTS") or url or "checkpoints.db",
                    repo=e("TRIAGE_REPO", "angelina10504/dep-triage-demo"), path=e("TRIAGE_PATH", "requirements.txt"),
                    password=e("APP_PASSWORD") or None, secret=e("APP_SECRET") or None,
                    cookie_secure=e("COOKIE_SECURE", "") in ("1", "true", "yes"), **kw)
@@ -168,6 +170,8 @@ def create_app(cfg: WebConfig | None = None) -> FastAPI:
 
     @app.get("/healthz")
     def healthz():
+        """Liveness only: never touches the database, so an uptime pinger keeps the web
+        service awake without keeping the (scale-to-zero) Postgres awake."""
         return {"ok": True}
 
     # ---------- login ----------

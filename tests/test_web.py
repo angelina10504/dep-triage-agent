@@ -29,9 +29,10 @@ def fetch(name, ecosystem):
 
 
 @pytest.fixture
-def web(tmp_path):
+def web(tmp_path, db_target):
+    """Runs every web test twice: on SQLite and (when available) on Postgres, like Neon."""
     gh = World(ci="failure")
-    db = str(tmp_path / "t.db")
+    db = db_target
     (tmp_path / "ev").mkdir()
     (tmp_path / "ev" / "tc2_excluded.txt").write_text("evidence")
 
@@ -40,7 +41,7 @@ def web(tmp_path):
                        github=(lambda: GitHubClient("t", session=gh)) if github else None,
                        fetch=fetch, other_ecosystems=("npm",), notes=notes, llm=FakeLLM(), wait=False)
 
-    cfg = WebConfig(db=db, checkpoints=str(tmp_path / "cp.db"), repo=REPO, password=PW, secret="s" * 32,
+    cfg = WebConfig(db=db, checkpoints=db if db.startswith("postgres") else str(tmp_path / "cp.db"), repo=REPO, password=PW, secret="s" * 32,
                     evidence_dir=str(tmp_path / "ev"), make_runtime=make_runtime, background=False)
     return TestClient(create_app(cfg)), gh, db, cfg
 
@@ -382,3 +383,54 @@ def test_existing_db_gets_the_risk_column(tmp_path):
     s.set_risk("d", "2", 1, {"breaking_risk": "low"})
     s.set_risk("d", "2", 1, {"breaking_risk": "high"})                 # never overwritten
     assert s.with_prs()[0].risk == {"breaking_risk": "low"}
+
+
+def test_db_copy_moves_history_once(tmp_path, db_target):
+    from triage.dbcopy import copy
+    src = str(tmp_path / "local.db")
+    seed_two_attempts(src)
+    ActionStore(src).save_run("r1", {"plans": []}, repo=REPO, source="requirements.txt", dry_run=True, stage="complete")
+    assert copy(src, db_target, log=lambda _: None)["actions"] == 2
+    assert copy(src, db_target, log=lambda _: None)["ci_observations"] == 0          # idempotent
+    dst = ActionStore(db_target)
+    assert [r.pr_number for r in dst.with_prs(REPO)] == [1, 3]
+    assert dst.latest_run(REPO)["thread_id"] == "r1"
+    dst.add_observation(dependency_id="d", target_version="1", repo=REPO, pr_number=9, pr_state="open",
+                        merged_at=None, head_sha="c", ci_status="pending", outcome="waiting for CI",
+                        checks=[], observed_at=T)                                     # ids keep working
+
+
+def test_healthz_does_not_touch_the_database(web, monkeypatch):
+    client, *_ = web
+    import triage.db
+
+    def boom(*a, **k):
+        raise AssertionError("healthz opened a database connection")
+    monkeypatch.setattr(triage.db.Database, "__init__", boom)
+    r = client.get("/healthz")
+    assert r.status_code == 200 and r.json() == {"ok": True}
+
+
+def test_config_from_env_uses_database_url_for_both(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@host/db?sslmode=require")
+    monkeypatch.delenv("TRIAGE_CHECKPOINTS", raising=False)
+    cfg = WebConfig.from_env()
+    assert cfg.db == cfg.checkpoints == "postgresql://u:p@host/db?sslmode=require"
+    monkeypatch.delenv("DATABASE_URL")
+    assert WebConfig.from_env().db == "triage.db"
+
+
+def test_cli_run_reads_requirements_from_github_without_a_local_file(tmp_path, monkeypatch):
+    """`python -m triage run --repo R` with no local path: the file comes from the base branch."""
+    from triage.graph import build_graph, sqlite_checkpointer
+    gh = World()
+    db = str(tmp_path / "t.db")
+    rt = Runtime(store=ActionStore(db), cache=LLMCache(db), github=lambda: GitHubClient("t", session=gh),
+                 fetch=fetch, other_ecosystems=(), notes=notes, llm=FakeLLM(), wait=False)
+    g = build_graph(rt, sqlite_checkpointer(str(tmp_path / "cp.db")))
+    cfg = {"configurable": {"thread_id": "gh-1"}}
+    g.invoke({"repo": REPO, "path": "requirements.txt", "dry_run": True}, cfg)
+    v = g.get_state(cfg).values
+    assert v["requirements_source"] == f"{REPO}@main:requirements.txt (GitHub API)"
+    assert [d["raw_name"] for d in v["dependencies"]] == ["requests", "Jinja2", "MarkupSafe"]
+    assert ("GET", f"/repos/{REPO}/contents/requirements.txt") in gh.calls

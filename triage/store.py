@@ -12,9 +12,10 @@ adds a row (intended vs observed state), nothing is overwritten.
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+
+from .db import Row, connect
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS actions (
@@ -89,7 +90,7 @@ class ActionRecord:
     risk: dict | None = None           # upgrade risk as shown to the approver
 
 
-def _record(row: sqlite3.Row) -> ActionRecord:
+def _record(row: Row) -> ActionRecord:
     d = dict(row)
     d["advisories"] = json.loads(d["advisories"]) if d.get("advisories") else []
     d["risk"] = json.loads(d["risk"]) if d.get("risk") else None
@@ -98,15 +99,15 @@ def _record(row: sqlite3.Row) -> ActionRecord:
 
 class ActionStore:
     def __init__(self, path: str = "triage.db"):
-        self.db = sqlite3.connect(path)
-        self.db.row_factory = sqlite3.Row
-        self.db.executescript(_SCHEMA)
-        have = {r["name"] for r in self.db.execute("PRAGMA table_info(actions)")}
+        """path: a SQLite file, or a postgres:// URL (deployed)."""
+        self.db = connect(path)
+        self.db.script(_SCHEMA)
+        have = self.db.columns("actions")
         for col, typ in _MIGRATIONS.items():
             if col not in have:
                 self.db.execute(f"ALTER TABLE actions ADD COLUMN {col} {typ}")
-        if "attempt" not in have:   # old key (dependency_id, target_version): rebuild with attempt = 1
-            self.db.executescript(
+        if "attempt" not in have and not self.db.postgres:   # old SQLite key: rebuild with attempt = 1
+            self.db.script(
                 "ALTER TABLE actions RENAME TO actions_old;" + _SCHEMA.split(";")[0] + ";"
                 f"INSERT INTO actions ({_ACTION_COLS}, attempt) SELECT {_ACTION_COLS}, 1 FROM actions_old;"
                 "DROP TABLE actions_old;")
@@ -133,9 +134,9 @@ class ActionStore:
         """Insert the approval once; an existing row (earlier approval) is kept as is."""
         now = _now()
         self.db.execute(
-            "INSERT OR IGNORE INTO actions (dependency_id, target_version, attempt, repo, branch, status,"
+            "INSERT INTO actions (dependency_id, target_version, attempt, repo, branch, status,"
             " approved_by, approved_at, updated_at, package, advisories)"
-            " VALUES (?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?, ?)",
+            " VALUES (?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
             (dependency_id, target_version, attempt, repo, branch, approved_by, now, now, package,
              json.dumps(advisories) if advisories else None),
         )
@@ -176,7 +177,7 @@ class ActionStore:
         q, args = "SELECT * FROM scan_runs", ()
         if repo:
             q, args = q + " WHERE repo = ?", (repo,)
-        row = self.db.execute(q + " ORDER BY updated_at DESC, rowid DESC LIMIT 1", args).fetchone()
+        row = self.db.execute(q + " ORDER BY updated_at DESC, created_at DESC, thread_id DESC LIMIT 1", args).fetchone()
         return {**dict(row), "data": json.loads(row["data"])} if row else None
 
     def record_pr(self, dependency_id: str, target_version: str, pr_number: int, pr_url: str,

@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import json
 import re
-import sqlite3
 from dataclasses import dataclass, field
 
+from ..db import connect
 from ..ci_watch import OUTCOME_FAILING, OUTCOME_MERGED
 from ..scanner import count_unique
 from ..store import ActionRecord, ActionStore
@@ -135,8 +135,7 @@ class Row:
 
 
 def _observations(db_path: str, repo: str) -> dict[int, list[dict]]:
-    db = sqlite3.connect(db_path)
-    db.row_factory = sqlite3.Row
+    db = connect(db_path)
     try:
         out: dict[int, list[dict]] = {}
         for r in db.execute("SELECT * FROM ci_observations WHERE repo = ? ORDER BY id", (repo,)):

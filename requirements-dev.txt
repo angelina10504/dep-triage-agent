@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest>=8.0
+httpx>=0.27          # FastAPI TestClient
+pgserver>=0.1.4      # local Postgres for the Postgres variant of the tests (optional)

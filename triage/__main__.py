@@ -6,6 +6,7 @@
   python -m triage status --repo owner/name [--wait]                 PR + CI table (+ diagnosis)
   python -m triage graph [docs/graph.md]                             write the graph as Mermaid
   python -m triage web [--host 127.0.0.1] [--port 8000]              web UI (FastAPI + HTMX)
+  python -m triage db-copy triage.db "$DATABASE_URL"                 copy records to another DB (e.g. Neon)
 """
 from __future__ import annotations
 
@@ -137,13 +138,16 @@ def _run(argv: list[str], resume: bool = False) -> int:
     ap = argparse.ArgumentParser(prog=f"python -m triage {'resume' if resume else 'run'}",
                                  description="Full agent run as a LangGraph graph (pauses for y/N approval).")
     if not resume:
-        ap.add_argument("requirements", help="path to requirements.txt")
+        ap.add_argument("requirements", nargs="?",
+                        help="local requirements.txt (optional with --repo: default is the file on the repo's base branch)")
         ap.add_argument("--repo", help="GitHub repo owner/name (without it: scan + risk only)")
         ap.add_argument("--path", default="requirements.txt", help="dependency file path inside the repo")
         ap.add_argument("--base", help="base branch (default: the repo's default branch)")
     ap.add_argument("--thread", required=resume, help="thread id (resume a paused run with the same id)")
-    ap.add_argument("--db", default="triage.db", help="SQLite file: approved actions, CI history, LLM cache")
-    ap.add_argument("--checkpoints", default="checkpoints.db", help="SQLite file for LangGraph checkpoints")
+    ap.add_argument("--db", default="triage.db",
+                    help="SQLite file or postgres:// URL: approved actions, CI history, runs, LLM cache")
+    ap.add_argument("--checkpoints", default="checkpoints.db",
+                    help="SQLite file or postgres:// URL for LangGraph checkpoints")
     ap.add_argument("--no-wait", action="store_true", help="observe CI once instead of waiting for a result")
     ap.add_argument("--timeout", type=float, default=600, help="seconds to wait for CI at most")
     ap.add_argument("--interval", type=float, default=15, help="seconds between CI polls")
@@ -152,11 +156,13 @@ def _run(argv: list[str], resume: bool = False) -> int:
         ap.add_argument("--dry-run", action="store_true",
                         help="read the repo for repo-aware risk, but propose and open nothing")
     args = ap.parse_args(argv)
+    if not resume and not args.requirements and not args.repo:
+        ap.error("give a local requirements file, or --repo owner/name to read it from GitHub")
 
     thread = args.thread or f"triage-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
     graph = build_graph(_runtime(args, wait=not args.no_wait), sqlite_checkpointer(args.checkpoints))
     config = {"configurable": {"thread_id": thread}}
-    first = None if resume else {"requirements_path": args.requirements, "repo": args.repo,
+    first = None if resume else {"requirements_path": args.requirements or None, "repo": args.repo,
                                  "base": args.base, "path": args.path, "dry_run": args.dry_run}
     return _drive(graph, config, first, verbose=args.verbose)
 
@@ -185,7 +191,7 @@ def _status(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="python -m triage status",
                                  description="Show PR and CI status for every recorded upgrade PR.")
     ap.add_argument("--repo", required=True, help="GitHub repo owner/name")
-    ap.add_argument("--db", default="triage.db", help="SQLite file recording approved actions")
+    ap.add_argument("--db", default="triage.db", help="SQLite file or postgres:// URL recording approved actions")
     ap.add_argument("--wait", action="store_true", help="poll until no PR has pending CI")
     ap.add_argument("--timeout", type=float, default=600, help="seconds to wait at most (with --wait)")
     ap.add_argument("--interval", type=float, default=15, help="seconds between polls (with --wait)")
@@ -246,13 +252,33 @@ def _web(argv: list[str]) -> int:
               file=sys.stderr)
     if not cfg.secret:
         print("note: APP_SECRET is not set; logins are lost when the server restarts.", file=sys.stderr)
+    from .db import is_postgres
+    if not is_postgres(cfg.db):
+        print(f"note: DATABASE_URL is not set; state is in the local SQLite file {cfg.db} "
+              "(lost on hosts that wipe the disk on restart).", file=sys.stderr)
     print(f"Triage web UI for {cfg.repo}: http://{'localhost' if args.host in ('127.0.0.1', '0.0.0.0') else args.host}:{args.port}/")
-    uvicorn.run(create_app(cfg), host=args.host, port=args.port, proxy_headers=True, log_level="info")
+    # Behind the host's proxy (Render): trust X-Forwarded-For/-Proto so the login rate limit sees the
+    # real client IP. Locally only 127.0.0.1 is trusted.
+    uvicorn.run(create_app(cfg), host=args.host, port=args.port, proxy_headers=True,
+                forwarded_allow_ips=os.environ.get("FORWARDED_ALLOW_IPS", "127.0.0.1"), log_level="info")
+    return 0
+
+
+def _db_copy(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(prog="python -m triage db-copy",
+                                 description="Copy PR/CI/run records between databases (skips rows already there).")
+    ap.add_argument("source", help="SQLite file or postgres:// URL")
+    ap.add_argument("target", help="SQLite file or postgres:// URL")
+    args = ap.parse_args(argv)
+    from .dbcopy import copy
+    copy(args.source, args.target)
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["db-copy"]:
+        return _db_copy(argv[1:])
     if argv[:1] == ["web"]:
         return _web(argv[1:])
     if argv[:1] == ["status"]:
@@ -269,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--repo", help="GitHub repo owner/name to open upgrade PRs against")
     ap.add_argument("--path", default="requirements.txt", help="dependency file path inside the repo")
     ap.add_argument("--base", help="base branch (default: the repo's default branch)")
-    ap.add_argument("--db", default="triage.db", help="SQLite file recording approved actions")
+    ap.add_argument("--db", default="triage.db", help="SQLite file or postgres:// URL recording approved actions")
     ap.add_argument("--open-prs", action="store_true",
                     help="full agent run (same as 'run'): risk, y/N approval, PRs, CI, diagnosis")
     ap.add_argument("--thread", help="with --open-prs: thread id for the run")

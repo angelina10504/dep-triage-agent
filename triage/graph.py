@@ -44,6 +44,7 @@ NODES = ("collect", "fetch_advisories", "match", "plan", "assess_upgrade_risk", 
 class TriageState(TypedDict, total=False):
     requirements_path: str
     requirements_text: str
+    requirements_source: str
     repo: str | None
     base: str | None
     path: str
@@ -118,7 +119,7 @@ def _key(proposal: dict) -> str:
 
 
 # What a stored scan run keeps (scan_runs.data): enough to show the table and TC1-TC4 after a restart.
-RUN_KEYS = ("dependencies", "plans", "matches", "warnings", "risks", "explanations", "repo_summary", "base",
+RUN_KEYS = ("requirements_source", "dependencies", "plans", "matches", "warnings", "risks", "explanations", "repo_summary", "base",
             "prs", "ci", "ci_timed_out", "diagnoses", "notice")
 
 
@@ -133,8 +134,23 @@ def _persist(rt: Runtime, s: dict, config: RunnableConfig | None, stage: str) ->
 
 def build_graph(rt: Runtime, checkpointer=None):
     def collect(s: TriageState):
-        text = s.get("requirements_text") or Path(s["requirements_path"]).read_text()
-        return {"requirements_text": text, "dependencies": [_plain(d) for d in parse_requirements(text)]}
+        """Dependency file: given text, a local path (CLI option), or - deployed - read from
+        the repo's base branch via the GitHub API (no checkout needed)."""
+        out = {}
+        if s.get("requirements_text"):
+            text, source = s["requirements_text"], s.get("requirements_source") or "given text"
+        elif s.get("requirements_path"):
+            text, source = Path(s["requirements_path"]).read_text(), f"local file {s['requirements_path']}"
+        elif s.get("repo"):
+            client = rt.client()
+            base = s.get("base") or client.default_branch(s["repo"])
+            path = s.get("path") or "requirements.txt"
+            text, _ = client.get_file(s["repo"], path, base)
+            source, out["base"] = f"{s['repo']}@{base}:{path} (GitHub API)", base
+        else:
+            raise ValueError("no dependency file: give a local path or a repo")
+        return {**out, "requirements_text": text, "requirements_source": source,
+                "dependencies": [_plain(d) for d in parse_requirements(text)]}
 
     def fetch_advisories(s: TriageState):
         fetched, warnings = fetch_all(_deps(s), rt.fetch or osv.fetch_advisories, rt.other_ecosystems)
@@ -334,8 +350,22 @@ def build_graph(rt: Runtime, checkpointer=None):
     return g.compile(checkpointer=checkpointer)
 
 
-def sqlite_checkpointer(path: str = "checkpoints.db") -> SqliteSaver:
-    return SqliteSaver(sqlite3.connect(path, check_same_thread=False))
+def checkpointer(target: str = "checkpoints.db"):
+    """LangGraph checkpoints: a SQLite file locally, Postgres when target is a postgres:// URL
+    (deployed: paused approvals survive restarts and redeploys). Close with cp.conn.close()."""
+    from .db import is_postgres
+    if is_postgres(target):
+        import psycopg
+        from langgraph.checkpoint.postgres import PostgresSaver
+        from psycopg.rows import dict_row
+        conn = psycopg.connect(target, autocommit=True, prepare_threshold=0, row_factory=dict_row, connect_timeout=15)
+        cp = PostgresSaver(conn)
+        cp.setup()                                   # idempotent: creates/migrates its tables
+        return cp
+    return SqliteSaver(sqlite3.connect(target, check_same_thread=False))
+
+
+sqlite_checkpointer = checkpointer                   # old name, still used by tests/CLI
 
 
 def pending_interrupt(graph, config) -> dict | None:
@@ -354,7 +384,8 @@ def progress(node: str, update: dict) -> str:
     """One short line per finished node, for the CLI."""
     u = update or {}
     if node == "collect":
-        return f"{len(u.get('dependencies', []))} dependencies"
+        src = u.get("requirements_source")
+        return f"{len(u.get('dependencies', []))} dependencies" + (f" from {src}" if src else "")
     if node == "fetch_advisories":
         f = u.get("fetched", {})
         n = sum(len(v["advisories"]) + sum(len(o["advisories"]) for o in v["other"]) for v in f.values())

@@ -41,3 +41,6 @@ python -m triage path/to/requirements.txt --explain
 | Installed version inside an OSV `introduced`/`fixed`/`last_affected` interval | `vulnerable` (TC1) |
 | Version not pinned with `==`, invalid, or no comparable range | `uncertain` |
 | Upgrade target | highest `fixed` across matched advisories, re-checked against every advisory |
+
+## Deploy
+See [DEPLOY.md](DEPLOY.md): Render (free, Docker) + Neon (free Postgres), with exact steps.

@@ -1,0 +1,24 @@
+# Render Blueprint: New -> Blueprint -> pick this repo. Secrets marked sync: false are
+# asked for in the Render dashboard; they are never stored in this file.
+services:
+  - type: web
+    name: dep-triage
+    runtime: docker
+    plan: free
+    region: singapore
+    branch: main
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL          # Neon pooled connection string (sslmode=require)
+        sync: false
+      - key: GITHUB_TOKEN          # fine-grained, dep-triage-demo only
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: APP_PASSWORD          # needed to Run scan / Approve / Refresh CI
+        sync: false
+      - key: APP_SECRET            # signs the session cookie
+        generateValue: true
+      - key: TRIAGE_REPO
+        value: angelina10504/dep-triage-demo

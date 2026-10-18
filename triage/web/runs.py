@@ -1,16 +1,17 @@
 """Web side state in triage.db: graph runs, background jobs (with live progress lines),
 approval decisions (who / when / after seeing the risk) and CI failure diagnoses.
 
-Jobs run one at a time in a background thread. Every job opens its own SQLite
-connections (sqlite3 objects must stay in the thread that made them).
+Jobs run one at a time in a background thread. Every call opens its own connection
+(SQLite file or Postgres URL), so nothing is shared between threads.
 """
 from __future__ import annotations
 
 import json
-import sqlite3
 import threading
 from datetime import datetime, timezone
 from typing import Callable
+
+from ..db import Database, Row, connect
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS web_runs (
@@ -73,27 +74,35 @@ class Busy(RuntimeError):
 class RunStore:
     def __init__(self, path: str):
         self.path = path
-        with self._db() as db:
-            db.executescript(_SCHEMA)
-
-    def _db(self) -> sqlite3.Connection:
-        db = sqlite3.connect(self.path, timeout=10)
-        db.row_factory = sqlite3.Row
-        return db
-
-    def _q(self, sql: str, args: tuple = ()) -> list[sqlite3.Row]:
         db = self._db()
         try:
-            with db:
-                return db.execute(sql, args).fetchall()
+            db.script(_SCHEMA)
+        finally:
+            db.close()
+
+    def _db(self) -> Database:
+        return connect(self.path)
+
+    def _q(self, sql: str, args: tuple = ()) -> list[Row]:
+        db = self._db()
+        try:
+            rows = db.execute(sql, args).fetchall()
+            db.commit()
+            return rows
         finally:
             db.close()
 
     def _x(self, sql: str, args: tuple = ()) -> int:
+        """Run one write; returns the row count (or the id, for INSERT ... RETURNING id)."""
         db = self._db()
         try:
-            with db:
-                return db.execute(sql, args).lastrowid
+            cur = db.execute(sql, args)
+            out = cur.fetchone()[0] if " RETURNING " in sql else cur.rowcount
+            db.commit()
+            return out
+        except Exception:
+            db.rollback()
+            raise
         finally:
             db.close()
 
@@ -115,14 +124,15 @@ class RunStore:
         return _run(rows[0]) if rows else None
 
     def runs(self, limit: int = 20) -> list[dict]:
-        return [_run(r) for r in self._q("SELECT * FROM web_runs ORDER BY started_at DESC, rowid DESC LIMIT ?", (limit,))]
+        return [_run(r) for r in self._q("SELECT * FROM web_runs ORDER BY started_at DESC, thread_id DESC LIMIT ?", (limit,))]
 
     def awaiting(self) -> list[dict]:
         return [_run(r) for r in self._q("SELECT * FROM web_runs WHERE status = 'awaiting_approval' ORDER BY started_at")]
 
     # ---------- jobs ----------
     def new_job(self, kind: str, thread_id: str | None, by: str) -> int:
-        return self._x("INSERT INTO web_jobs (kind, thread_id, status, started_by, started_at) VALUES (?, ?, 'running', ?, ?)",
+        return self._x("INSERT INTO web_jobs (kind, thread_id, status, started_by, started_at)"
+                       " VALUES (?, ?, 'running', ?, ?) RETURNING id",
                        (kind, thread_id, by, now()))
 
     def finish_job(self, job_id: int, status: str, error: str | None = None) -> None:
@@ -151,15 +161,8 @@ class RunStore:
     def decide(self, thread_id: str, key: str, package: str, decision: str, by: str,
                risk_shown_at: str | None) -> bool:
         """First decision wins; returns False if this proposal was already decided."""
-        db = self._db()
-        try:
-            with db:
-                cur = db.execute(
-                    "INSERT OR IGNORE INTO web_decisions VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (thread_id, key, package, decision, by, now(), risk_shown_at))
-                return cur.rowcount == 1
-        finally:
-            db.close()
+        return self._x("INSERT INTO web_decisions VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                       (thread_id, key, package, decision, by, now(), risk_shown_at)) == 1
 
     def decisions(self, thread_id: str | None = None) -> list[dict]:
         if thread_id:
@@ -180,7 +183,7 @@ class RunStore:
         return out
 
 
-def _run(row: sqlite3.Row) -> dict:
+def _run(row: Row) -> dict:
     d = dict(row)
     d["snapshot"] = json.loads(d["snapshot"]) if d.get("snapshot") else {}
     d["interrupt"] = json.loads(d["interrupt"]) if d.get("interrupt") else None

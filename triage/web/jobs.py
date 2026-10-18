@@ -10,7 +10,7 @@ from langgraph.types import Command
 
 from ..ci_watch import watch
 from ..diagnose import diagnose_failure
-from ..graph import Runtime, build_graph, pending_interrupt, progress, sqlite_checkpointer
+from ..graph import Runtime, build_graph, checkpointer, pending_interrupt, progress
 from ..llm import llm_budget
 from .runs import RunStore
 
@@ -29,7 +29,7 @@ def _logging_sleep(log: Log, sleep: Callable[[float], None] | None) -> Callable[
 
 def _drive(rt: Runtime, checkpoints: str, store: RunStore, thread: str, repo: str, inp, log: Log) -> None:
     rt.sleep = _logging_sleep(log, rt.sleep)
-    cp = sqlite_checkpointer(checkpoints)
+    cp = checkpointer(checkpoints)
     try:
         graph = build_graph(rt, cp)
         config = {"configurable": {"thread_id": thread}}
@@ -55,18 +55,10 @@ def _drive(rt: Runtime, checkpoints: str, store: RunStore, thread: str, repo: st
 
 def scan_job(make_runtime: Callable[[], Runtime], checkpoints: str, store: RunStore, thread: str,
              repo: str, path: str, dry_run: bool) -> Callable[[Log], None]:
+    """No local checkout: the graph reads the dependency file, workflows and .py files from GitHub."""
     def job(log: Log) -> None:
-        rt = make_runtime()
-        try:
-            client = rt.client()
-            base = client.default_branch(repo)
-            text, _ = client.get_file(repo, path, base)
-        except Exception as e:
-            store.set_run(thread, "error", error=f"{type(e).__name__}: {str(e)[:300]}")
-            raise
-        log(f"read {path} from {repo}@{base} ({len(text.splitlines())} lines)")
-        _drive(rt, checkpoints, store, thread, repo,
-               {"requirements_text": text, "repo": repo, "base": base, "path": path, "dry_run": dry_run}, log)
+        _drive(make_runtime(), checkpoints, store, thread, repo,
+               {"repo": repo, "path": path, "dry_run": dry_run}, log)
     return job
 
 
