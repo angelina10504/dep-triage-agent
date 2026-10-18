@@ -10,6 +10,7 @@ PIN="requests==2.28.0"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
+echo "[1/4] cloning $REPO into a temp dir..."
 git clone --quiet --depth 1 "$REPO" "$work/demo"
 cd "$work/demo"
 
@@ -18,13 +19,16 @@ if ! grep -qiE '^requests[[:space:]]*==' requirements.txt; then
   exit 1
 fi
 # Replace only the requests pin, keep every other line as is.
+echo "[2/4] pinning $PIN in requirements.txt..."
 sed -E -i.bak "s/^[Rr]equests[[:space:]]*==[^[:space:];#]*/$PIN/" requirements.txt && rm requirements.txt.bak
 
 if git diff --quiet -- requirements.txt; then
   echo "already pinned to $PIN; nothing to push"
   exit 0
 fi
+echo "[3/4] change to commit:"
 git --no-pager diff -- requirements.txt
+echo "[4/4] committing and pushing to main..."
 git add requirements.txt
 git commit --quiet -m "Reset demo: pin $PIN for the next TC1 run"
 git push --quiet origin HEAD:main            # plain push: rejected if main moved, never forced
