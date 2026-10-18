@@ -200,7 +200,11 @@ def build_graph(rt: Runtime, checkpointer=None):
                                "attempt": r["proposal"]["attempt"], "reason": r["reason"],
                                "render": Proposal(**r["proposal"]).render(),
                                "risk": r.get("risk_lines", []),
-                               "previous_pr": r["pr"]} for r in pending],
+                               "previous_pr": r["pr"],
+                               "dependency_id": r["dependency_id"],        # structured copy for the web UI
+                               "proposal": {k: r["proposal"][k] for k in (
+                                   "repo", "base", "branch", "path", "line", "old_line", "new_line", "title",
+                                   "current_version", "target_version", "advisory_ids")}} for r in pending],
             })
             answers = answers if isinstance(answers, dict) else {}
             approvals = {_key(r["proposal"]): answers.get(_key(r["proposal"])) is True for r in pending}

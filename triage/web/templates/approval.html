@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Approve upgrade PRs</h1>
+<p class="muted">Run <code>{{ run.thread_id }}</code> started by {{ run.started_by }} at {{ run.started_at }}. Status: <b>{{ run.status | replace('_', ' ') }}</b>.</p>
+
+{% if run.status != 'awaiting_approval' %}
+  <p>This run is not waiting for approval.</p>
+  {% if decided %}
+  <h2>Decisions</h2>
+  <ul>{% for d in decided.values() %}<li>{{ d.package }}: <b>{{ d.decision }}</b> by {{ d.decided_by }} at {{ d.decided_at }}{% if d.risk_shown_at %} (risk shown {{ d.risk_shown_at }}){% endif %}</li>{% endfor %}</ul>
+  {% endif %}
+  {% if run.snapshot.prs %}
+  <h2>Actions</h2>
+  <ul>{% for p in run.snapshot.prs %}<li>{{ p.package }} ({{ p.branch }}): {{ p.outcome }}{% if p.pr_url %} <a href="{{ p.pr_url | safe_url }}" target="_blank" rel="noopener noreferrer">PR #{{ p.pr_number }}</a>{% endif %}</li>{% endfor %}</ul>
+  {% endif %}
+  {% if run.snapshot.notice %}<p>{{ run.snapshot.notice }}</p>{% endif %}
+  <p><a href="/">Back to the triage table</a></p>
+{% else %}
+  <p>{{ run.interrupt.question }} Each proposal needs its own decision. The run continues once every proposal is decided.
+    {% if not user %}<b><a href="/login">Log in</a> to approve or reject.</b>{% endif %}</p>
+
+  {% for it in items %}
+  {% set p = it.p %}{% set pr = p.proposal %}
+  <article class="proposal">
+    <h2>{{ p.package }} {{ pr.current_version if pr else '' }} &rarr; {{ pr.target_version if pr else '' }}
+      {% if p.attempt > 1 %}<span class="muted small">attempt {{ p.attempt }}</span>{% endif %}</h2>
+    {% if p.previous_pr %}<p class="small">Re-run: previous PR #{{ p.previous_pr.number }} was {{ 'merged' if p.previous_pr.merged_at else p.previous_pr.state }}, but the base branch still pins the vulnerable version.</p>{% endif %}
+    {% if pr %}
+    <p><code>{{ pr.repo }}</code> base <code>{{ pr.base }}</code> &larr; branch <code>{{ pr.branch }}</code></p>
+    <pre class="diff">{{ pr.path }} line {{ pr.line }}
+<span class="del">- {{ pr.old_line }}</span>
+<span class="add">+ {{ pr.new_line }}</span></pre>
+    <p class="small">PR title: {{ pr.title }}</p>
+    {% else %}<pre>{{ p.render }}</pre>{% endif %}
+
+    <h3>Advisories fixed ({{ it.matches | length }} records)</h3>
+    <ul class="small">
+      {% for m in it.matches %}<li><a href="{{ m.url | safe_url }}" target="_blank" rel="noopener noreferrer">{{ m.advisory_id }}</a> <code>{{ m.affected_range }}</code> fixed {{ m.fixed_version or '-' }}: {{ m.summary }}</li>
+      {% else %}{% for a in (pr.advisory_ids if pr else []) %}<li>{{ a }}</li>{% endfor %}{% endfor %}
+    </ul>
+
+    <div id="risk-{{ it.idx }}" class="riskbox" hx-get="/approvals/{{ run.thread_id }}/{{ it.idx }}/risk" hx-trigger="revealed" hx-swap="innerHTML">
+      <p class="muted">Loading the upgrade risk... <a href="/approvals/{{ run.thread_id }}/{{ it.idx }}/risk">open it</a></p>
+    </div>
+
+    <div class="decide" id="decide-{{ it.idx }}">
+      {% if it.d %}
+        <p><b>{{ it.d.decision | capitalize }}</b> by {{ it.d.decided_by }} at {{ it.d.decided_at }}.</p>
+      {% elif user %}
+        <button class="primary" disabled title="Read the risk first">Approve (read the risk first)</button>
+        <form method="post" action="/approvals/{{ run.thread_id }}/{{ it.idx }}/reject" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="danger">Reject</button>
+        </form>
+      {% endif %}
+    </div>
+  </article>
+  {% endfor %}
+
+  {% if all_decided and user %}
+  <form method="post" action="/approvals/{{ run.thread_id }}/resume">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="primary">Resume run</button>
+  </form>
+  {% endif %}
+{% endif %}
+{% endblock %}

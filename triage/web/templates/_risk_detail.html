@@ -1,0 +1,30 @@
+{# expects `risk` or `r.risk` #}
+{% set rk = risk if risk is defined and risk else r.risk %}
+<p>{{ rk.risk_reason }}</p>
+{% if rk.repo_python %}<p class="small muted">Repo Python: {{ rk.repo_python }}</p>{% endif %}
+{% if rk.usages %}
+<p><b>Repo usage of removed APIs:</b></p>
+<ul class="usages">{% for u in rk.usages %}<li><code>{{ u.path }}:{{ u.line }}</code> <code>{{ u.code }}</code>{% if u.symbol %} <span class="muted small">({{ u.symbol }})</span>{% endif %}</li>{% endfor %}</ul>
+{% endif %}
+{% set applicable = rk.breaking_changes | selectattr('applicable', 'ne', false) | list %}
+{% set na = rk.breaking_changes | selectattr('applicable', 'equalto', false) | list %}
+{% if applicable %}
+<p><b>Breaking changes in the release notes</b> ({{ applicable | length }}, each cited):</p>
+<ul class="changes">
+{% for c in applicable if c.used %}
+  <li><span class="pill failing">used by repo</span> {{ c.change }}
+    <a class="small" href="{{ c.source_url | safe_url }}" target="_blank" rel="noopener noreferrer">source</a></li>
+{% endfor %}
+{% for c in applicable if not c.used %}
+  <li>{{ c.change }} <a class="small" href="{{ c.source_url | safe_url }}" target="_blank" rel="noopener noreferrer">source</a></li>
+{% endfor %}
+</ul>
+{% endif %}
+{% if na %}
+<details><summary>{{ na[0].not_applicable }}: {{ na | length }} item(s), not counted</summary>
+  <ul class="small">{% for c in na %}<li>{{ c.change }} <a href="{{ c.source_url | safe_url }}" target="_blank" rel="noopener noreferrer">source</a></li>{% endfor %}</ul>
+</details>
+{% endif %}
+{% if rk.symbols %}<p class="small muted">Symbols searched in the repo: {{ rk.symbols | join(', ') }}</p>{% endif %}
+{% if rk.reasons %}<p class="small muted">LLM note (advisory only): {{ rk.reasons }}</p>{% endif %}
+{% if rk.dropped_uncited %}<p class="small muted">{{ rk.dropped_uncited }} claimed change(s) dropped: cited no fetched URL.</p>{% endif %}

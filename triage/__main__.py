@@ -5,6 +5,7 @@
   python -m triage resume --thread <id>                              answer a paused approval
   python -m triage status --repo owner/name [--wait]                 PR + CI table (+ diagnosis)
   python -m triage graph [docs/graph.md]                             write the graph as Mermaid
+  python -m triage web [--host 127.0.0.1] [--port 8000]              web UI (FastAPI + HTMX)
 """
 from __future__ import annotations
 
@@ -227,8 +228,33 @@ def _status(argv: list[str]) -> int:
     return 0
 
 
+def _web(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(prog="python -m triage web",
+                                 description="Web triage table with approve buttons. Viewing is public; "
+                                             "Run scan / Approve / Refresh need APP_PASSWORD from .env.")
+    ap.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"),
+                    help="bind address (0.0.0.0 to serve other machines)")
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8000")))
+    args = ap.parse_args(argv)
+    _load_dotenv()
+    import uvicorn
+
+    from .web.app import WebConfig, create_app
+    cfg = WebConfig.from_env()
+    if not cfg.password:
+        print("warning: APP_PASSWORD is not set; the UI is read-only (nobody can scan, approve or refresh).",
+              file=sys.stderr)
+    if not cfg.secret:
+        print("note: APP_SECRET is not set; logins are lost when the server restarts.", file=sys.stderr)
+    print(f"Triage web UI for {cfg.repo}: http://{'localhost' if args.host in ('127.0.0.1', '0.0.0.0') else args.host}:{args.port}/")
+    uvicorn.run(create_app(cfg), host=args.host, port=args.port, proxy_headers=True, log_level="info")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["web"]:
+        return _web(argv[1:])
     if argv[:1] == ["status"]:
         return _status(argv[1:])
     if argv[:1] == ["run"]:

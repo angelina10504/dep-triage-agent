@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="bar">
+  <div>
+    <h1>Triage table</h1>
+    <p class="muted">
+      {% if latest %}Latest run <a href="/approvals/{{ latest.thread_id }}">{{ latest.thread_id }}</a>
+        ({{ latest.status | replace('_', ' ') }}, {{ latest.updated_at }}{% if latest.dry_run %}, dry run{% endif %}).
+        {% if latest.snapshot.repo_summary and latest.snapshot.repo_summary.python %}Repo Python {{ latest.snapshot.repo_summary.python }}
+        ({{ latest.snapshot.repo_summary.python_source }}).{% endif %}
+      {% else %}No scan run from the web yet; showing recorded PRs only.{% endif %}
+    </p>
+  </div>
+  <div class="actions">
+    {% if user %}
+      <form method="post" action="/scan" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <label class="small"><input type="checkbox" name="dry_run" value="1"> dry run</label>
+        <button class="primary" {% if busy %}disabled title="a job is running"{% endif %}>Run scan</button>
+      </form>
+      <form method="post" action="/refresh" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <button {% if busy %}disabled title="a job is running"{% endif %}>Refresh CI</button>
+      </form>
+    {% else %}
+      <span class="muted small">{% if can_login %}<a href="/login">Log in</a> to run scans, approve PRs or refresh CI.{% endif %}</span>
+    {% endif %}
+  </div>
+</section>
+
+{% if jobs and jobs[0].status == 'running' %}
+<p class="flash">Job running: <a href="/jobs/{{ jobs[0].id }}">{{ jobs[0].kind }} #{{ jobs[0].id }}</a></p>
+{% endif %}
+
+<div class="table-wrap">
+<table class="triage">
+  <thead><tr>
+    <th></th><th>Package</th><th>Advisories</th><th>Risk</th><th>PR</th><th>PR state</th><th>CI</th><th>Outcome</th>
+  </tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr class="row {{ r.css }}">
+      <td><button class="toggle" data-target="ev-{{ loop.index }}" aria-expanded="false" aria-controls="ev-{{ loop.index }}" title="Show evidence">+</button></td>
+      <td><b>{{ r.package }}</b> <span class="muted">{{ r.current }}{% if r.target %} &rarr; {{ r.target }}{% endif %}</span></td>
+      <td>{{ r.advisory_summary }}</td>
+      <td>{% if r.risk %}<span class="risk {{ r.risk.breaking_risk }}">{{ r.risk.breaking_risk }}</span>{% elif r.plan_status == 'upgrade' %}<span class="muted">not assessed</span>{% else %}<span class="muted">-</span>{% endif %}</td>
+      <td>{% if r.pr %}<a href="{{ r.pr.url | safe_url }}" target="_blank" rel="noopener noreferrer">#{{ r.pr.number }}</a>{% if r.pr.attempt > 1 %} <span class="muted small">attempt {{ r.pr.attempt }}</span>{% endif %}{% else %}<span class="muted">-</span>{% endif %}</td>
+      <td>{% if r.obs %}<span class="pill {{ status_class(r.obs.pr_state, None) if r.obs.pr_state != 'open' else 'open' }}">{{ r.obs.pr_state }}</span>{% else %}-{% endif %}</td>
+      <td>{% if r.obs %}<span class="pill {{ r.obs.ci_status }}">{{ r.obs.ci_status }}</span>{% else %}-{% endif %}</td>
+      <td class="outcome">{{ r.outcome }}</td>
+    </tr>
+    <tr class="evidence" id="ev-{{ loop.index }}" hidden>
+      <td></td>
+      <td colspan="7">{% include "_evidence.html" %}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="8" class="muted">Nothing yet. Log in and press "Run scan".</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<p class="legend small">
+  <span class="pill failing">failing</span> <span class="pill passing">passing</span>
+  <span class="pill pending">pending</span> <span class="pill merged">merged</span>
+  &nbsp;Click <b>+</b> on a row to see its evidence.
+</p>
+
+{% if jobs %}
+<h2>Recent jobs</h2>
+<ul class="jobs small">
+  {% for j in jobs %}<li><a href="/jobs/{{ j.id }}">{{ j.kind }} #{{ j.id }}</a> {{ j.status }} by {{ j.started_by }} at {{ j.started_at }}{% if j.error %} <span class="err">{{ j.error }}</span>{% endif %}</li>{% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

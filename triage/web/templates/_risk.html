@@ -1,0 +1,25 @@
+{% if not hx %}{% extends "base.html" %}{% endif %}
+{% block content %}
+{% if not hx %}<h1>Upgrade risk: {{ p.package }}</h1><p><a href="/approvals/{{ run.thread_id }}">Back to the approval page</a></p>{% endif %}
+<h3>Upgrade risk:
+  {% if risk %}<span class="risk {{ risk.breaking_risk }}">{{ risk.breaking_risk }}</span>{% else %}<span class="muted">not assessed</span>{% endif %}</h3>
+{% if risk %}
+  {% include "_risk_detail.html" %}
+{% else %}
+  {% for line in p.risk %}<p>{{ line }}</p>{% else %}<p class="muted">No risk assessment is stored for this proposal. Approve with care.</p>{% endfor %}
+{% endif %}
+
+{% set slot %}
+  {% if d %}
+    <p><b>{{ d.decision | capitalize }}</b> by {{ d.decided_by }} at {{ d.decided_at }}.</p>
+  {% elif user and can_act %}
+    <form method="post" action="/approvals/{{ run.thread_id }}/{{ idx }}/approve" class="inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="primary">Approve: open this PR</button>
+    </form>
+    <form method="post" action="/approvals/{{ run.thread_id }}/{{ idx }}/reject" class="inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="danger">Reject</button>
+    </form>
+  {% endif %}
+{% endset %}
+{% if hx %}<div class="decide" id="decide-{{ idx }}" hx-swap-oob="true">{{ slot }}</div>{% else %}<div class="decide">{{ slot }}</div>{% endif %}
+{% endblock %}

@@ -1,0 +1,87 @@
+<div class="ev">
+  <div class="ev-block">
+    <h4>Plan</h4>
+    <p>{{ r.plan_status }}: {{ r.plan_reason }}</p>
+  </div>
+
+  <div class="ev-block">
+    <h4>Advisories affecting {{ r.package }} {{ r.current }}</h4>
+    {% if r.vulnerable %}
+    <table class="mini">
+      <tr><th>Advisory</th><th>Affected range</th><th>Fixed</th><th>Source</th><th>Retrieved</th></tr>
+      {% for m in r.vulnerable %}
+      <tr>
+        <td><a href="{{ m.url | safe_url }}" target="_blank" rel="noopener noreferrer">{{ m.advisory_id }}</a>
+          {% if m.aliases %}<span class="muted small">{{ m.aliases | join(', ') }}</span>{% endif %}
+          <div class="small">{{ m.summary }}</div></td>
+        <td><code>{{ m.affected_range }}</code></td>
+        <td>{{ m.fixed_version or '-' }}</td>
+        <td>{{ m.source }}</td>
+        <td class="small">{{ m.retrieved_at }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% elif r.advisory_ids %}
+      <p>{% for a in r.advisory_ids %}<a href="https://osv.dev/vulnerability/{{ a.id | urlencode }}" target="_blank" rel="noopener noreferrer">{{ a.id }}</a>{% if not loop.last %}, {% endif %}{% endfor %}
+      <span class="muted small">(IDs recorded with the PR; run a scan for ranges)</span></p>
+    {% else %}
+      <p class="muted">None.</p>
+    {% endif %}
+    {% if r.other %}
+    <details><summary>{{ r.other | length }} other advisory record(s) not counted ({{ r.other | map(attribute='decision') | unique | join(', ') }})</summary>
+      <ul class="small">
+      {% for m in r.other %}
+        <li><a href="{{ m.url | safe_url }}" target="_blank" rel="noopener noreferrer">{{ m.advisory_id }}</a>
+          [{{ m.decision }}{% if m.queried_ecosystem != 'PyPI' %}, {{ m.queried_ecosystem }}{% endif %}] {{ m.reason }}</li>
+      {% endfor %}
+      </ul>
+    </details>
+    {% endif %}
+  </div>
+
+  {% if r.risk %}
+  <div class="ev-block">
+    <h4>Upgrade risk: <span class="risk {{ r.risk.breaking_risk }}">{{ r.risk.breaking_risk }}</span></h4>
+    {% include "_risk_detail.html" %}
+  </div>
+  {% endif %}
+
+  {% if r.pr %}
+  <div class="ev-block">
+    <h4>PR</h4>
+    <p><a href="{{ r.pr.url | safe_url }}" target="_blank" rel="noopener noreferrer">PR #{{ r.pr.number }}</a>
+      on <code>{{ r.pr.branch }}</code> (attempt {{ r.pr.attempt }}).
+      Approved by <b>{{ r.decision.decided_by if r.decision else r.pr.approved_by }}</b>
+      at {{ r.decision.decided_at if r.decision else r.pr.approved_at }}{% if r.decision and r.decision.risk_shown_at %}, after the risk was shown at {{ r.decision.risk_shown_at }}{% endif %}.</p>
+  </div>
+  {% endif %}
+
+  {% if r.obs %}
+  <div class="ev-block">
+    <h4>CI checks @ {{ r.obs.head_sha[:7] }} <span class="muted small">(observed {{ r.obs.observed_at }}; intended: CI passing, observed: {{ r.obs.ci_status }})</span></h4>
+    {% if r.obs.checks %}
+    <ul>
+      {% for c in r.obs.checks %}<li><span class="pill {{ status_class(None, 'passing' if c.state in ('success','neutral','skipped') else 'failing' if c.state in ('failure','cancelled','timed_out','error') else 'pending') }}">{{ c.state }}</span>
+        {{ c.kind }} <a href="{{ c.url | safe_url }}" target="_blank" rel="noopener noreferrer">{{ c.name }}</a></li>{% endfor %}
+    </ul>
+    {% else %}<p class="muted">No check runs or commit statuses on this commit.</p>{% endif %}
+    {% if r.obs.merged_at %}<p>Merged at {{ r.obs.merged_at }}. No deployment was observed.</p>{% endif %}
+    {% if r.history | length > 1 %}
+    <details><summary>{{ r.history | length }} observations (append-only history)</summary>
+      <ul class="small">{% for o in r.history %}<li>{{ o.observed_at }}: {{ o.pr_state }}, CI {{ o.ci_status }} &rarr; {{ o.outcome }}</li>{% endfor %}</ul>
+    </details>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if r.diagnosis %}
+  <div class="ev-block">
+    <h4>CI failure diagnosis <span class="muted small">({{ r.diagnosis.status }})</span></h4>
+    <p>{{ r.diagnosis.root_cause }}</p>
+    {% if r.diagnosis.evidence_lines %}<pre>{{ r.diagnosis.evidence_lines | join('\n') }}</pre>{% endif %}
+    {% if r.diagnosis.suggested_next_step %}<p><b>Next step:</b> {{ r.diagnosis.suggested_next_step }}</p>{% endif %}
+    {% if r.diagnosis.job_url %}<p class="small"><a href="{{ r.diagnosis.job_url | safe_url }}" target="_blank" rel="noopener noreferrer">job log</a> {{ r.diagnosis.log_window }}</p>{% endif %}
+    <p class="small">Outcome unchanged: <b>{{ r.diagnosis.outcome_unchanged }}</b></p>
+  </div>
+  {% endif %}
+</div>

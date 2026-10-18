@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ job.kind | capitalize }} job #{{ job.id }}</h1>
+<p class="muted">Started by {{ job.started_by }} at {{ job.started_at }}{% if job.thread_id %}, thread <code>{{ job.thread_id }}</code>{% endif %}.</p>
+{% include "_progress.html" %}
+{% endblock %}

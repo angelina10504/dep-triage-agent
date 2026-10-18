@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Official test cases</h1>
+<p class="muted">"Actual" and the badge are computed live from triage.db each time this page loads{% if latest %} (latest run {{ latest.thread_id }}){% endif %}.</p>
+{% for c in cases %}
+<article class="tc">
+  <h2><span class="badge {{ c.result | lower }}">{{ c.result }}</span> {{ c.id }}: {{ c.title }}</h2>
+  <dl>
+    <dt>Input</dt><dd>{{ c.input }}</dd>
+    <dt>Expected</dt><dd>{{ c.expected }}</dd>
+    <dt>Actual</dt><dd>{{ c.actual }}</dd>
+    <dt>Evidence</dt><dd>{% for label, url in c.evidence %}<a href="{{ url | safe_url if url.startswith('http') else url }}"{% if url.startswith('http') %} target="_blank" rel="noopener noreferrer"{% endif %}>{{ label }}</a>{% if not loop.last %} &middot; {% endif %}{% else %}<span class="muted">none yet</span>{% endfor %}</dd>
+  </dl>
+</article>
+{% endfor %}
+{% endblock %}

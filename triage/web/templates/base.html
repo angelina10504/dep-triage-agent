@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf }}">
+  <meta name="htmx-config" content='{"includeIndicatorStyles": false}'>
+  <title>{% block title %}Dependency Triage{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/htmx.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/">Dependency Advisory Triage</a>
+  <nav>
+    <a href="/">Triage table</a>
+    <a href="/test-cases">Test cases</a>
+    {% if awaiting %}<a class="badge pending" href="/approvals/{{ awaiting[0].thread_id }}">{{ awaiting|length }} approval{{ 's' if awaiting|length > 1 }} pending</a>{% endif %}
+  </nav>
+  <div class="who">
+    {% if user %}
+      <span>Signed in as <b>{{ user }}</b></span>
+      <form method="post" action="/logout" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <button class="link">Log out</button>
+      </form>
+    {% elif can_login %}
+      <a href="/login">Log in to act</a>
+    {% else %}
+      <span class="muted">read-only (APP_PASSWORD not set)</span>
+    {% endif %}
+  </div>
+</header>
+<main>
+  {% if flash %}<p class="flash">{{ flash }}</p>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+<footer class="muted">Repo <code>{{ repo }}</code>. Versions are matched by code, not an LLM. Opening a PR always needs a human approval. Merged is not the same as deployed.</footer>
+</body>
+</html>

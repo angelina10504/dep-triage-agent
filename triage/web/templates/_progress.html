@@ -1,0 +1,16 @@
+<div id="progress" {% if job.status == 'running' %}hx-get="/jobs/{{ job.id }}/progress" hx-trigger="every 1s" hx-swap="outerHTML"{% endif %}>
+  <p>Status: <span class="pill {{ 'pending' if job.status == 'running' else 'failing' if job.status in ('error', 'interrupted') else 'passing' }}">{{ job.status }}</span>
+    {% if job.status == 'running' %}<span class="muted small">updating every second</span>{% endif %}</p>
+  <pre class="log">{% for l in job.lines %}{{ l.line }}
+{% else %}starting...{% endfor %}</pre>
+  {% if job.status != 'running' %}
+    {% if run and run.status == 'awaiting_approval' %}
+      <p><a class="button primary" href="/approvals/{{ run.thread_id }}">Review and approve the proposed PRs</a></p>
+    {% elif job.status in ('error', 'interrupted') %}
+      <p class="err">{{ job.error }}</p>
+    {% endif %}
+    <p><a href="/">Back to the triage table</a></p>
+  {% else %}
+    <noscript><p>Reload this page to see new progress.</p></noscript>
+  {% endif %}
+</div>

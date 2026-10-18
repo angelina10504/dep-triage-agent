@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Log in</h1>
+{% if not can_login %}
+  <p>APP_PASSWORD is not set on the server, so nobody can run scans, approve or refresh. Viewing works without a login.</p>
+{% else %}
+<form method="post" action="/login" class="login">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <label>Your name <span class="muted small">(recorded with every approval)</span>
+    <input name="name" required maxlength="40" autocomplete="name"></label>
+  <label>App password <input name="password" type="password" required autocomplete="current-password"></label>
+  {% if error %}<p class="err">{{ error }}</p>{% endif %}
+  <button class="primary">Log in</button>
+</form>
+{% endif %}
+{% endblock %}
