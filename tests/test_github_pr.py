@@ -317,3 +317,17 @@ def test_cli_rerun_after_merge_asks_and_respects_no(setup, tmp_path, monkeypatch
 
     run(["y", "n"], "t3")                            # re-run: approve it
     assert [p["head"] for p in gh.pulls] == ["triage/requests-2.32.4", "triage/requests-2.32.4-2"]
+
+
+def test_merged_pr_found_only_on_github_is_recorded(setup, tmp_path):
+    """A fresh DB (e.g. the deployed one): the merged attempt-1 PR is remembered, not skipped."""
+    proposals, gh, client, store = setup
+    open_pr(proposals[0], client, store)
+    gh.merge(1)
+    _reset_main(gh)
+    open_pr(resolve(proposals[0], client, store).proposal, client, store)    # attempt 2 = PR #2
+    fresh = ActionStore(str(tmp_path / "fresh.db"))
+    res = resolve(proposals[0], client, fresh)
+    assert (res.action, res.proposal.attempt) == ("reuse", 2)
+    assert [(r.attempt, r.pr_number) for r in fresh.with_prs(REPO)] == [(1, 1), (2, 2)]
+    assert fresh.get(proposals[0].dependency_id, proposals[0].target_version, 1).approved_by == "(existing PR on GitHub)"

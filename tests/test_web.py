@@ -434,3 +434,67 @@ def test_cli_run_reads_requirements_from_github_without_a_local_file(tmp_path, m
     assert v["requirements_source"] == f"{REPO}@main:requirements.txt (GitHub API)"
     assert [d["raw_name"] for d in v["dependencies"]] == ["requests", "Jinja2", "MarkupSafe"]
     assert ("GET", f"/repos/{REPO}/contents/requirements.txt") in gh.calls
+
+
+def test_tc4_pass_when_latest_attempt_open_and_earlier_merged(web):
+    """Rows show the latest attempt, but TC4 looks at every attempt: PR #1 merged counts."""
+    from triage.web.views import build_rows, test_cases
+    client, gh, db, _ = web
+    seed_two_attempts(db)
+    store = ActionStore(db)            # PR #1 recorded late (after PR #3): still the earlier attempt
+    store.db.execute("UPDATE actions SET approved_at = ? WHERE attempt = 1", ("2026-10-19T09:00:00+00:00",))
+    store.db.commit()
+    rows, latest = build_rows(db, REPO)
+    assert rows[0].latest.number == 3 and rows[0].latest.obs["pr_state"] == "open"
+    tc4 = {t.id: t for t in test_cases(rows, latest, [])}["TC4"]
+    assert tc4.result == "PASS" and "PR #1" in tc4.input and "merged, NOT deployed" in tc4.actual
+    assert badges(client.get("/test-cases").text)["TC4"] == "PASS"
+
+
+def test_refresh_finds_merged_earlier_attempt_missing_from_db(web):
+    """Deployed case: the DB only knows PR #2 (attempt 2, open); PR #1 (attempt 1) is merged on
+    GitHub. Refresh CI finds and re-observes it -> TC4 PASS, while the row keeps PR #2."""
+    client, gh, db, _ = web
+    dep, url = "PyPI:requests@2.19.0#L1", f"https://github.com/{REPO}/pull/"
+    gh.pulls += [
+        {"number": 1, "html_url": url + "1", "head": "triage/requests-2.32.4", "state": "closed",
+         "merged": True, "merged_at": "2026-10-17T12:00:00Z"},
+        {"number": 2, "html_url": url + "2", "head": "triage/requests-2.32.4-2", "state": "open",
+         "merged": False, "merged_at": None}]
+    s = ActionStore(db)
+    s.record_approval(dep, "2.32.4", REPO, "triage/requests-2.32.4-2", "(existing PR on GitHub)", "requests",
+                      [{"id": "GHSA-TEST-REQ", "aliases": []}], 2)
+    s.record_pr(dep, "2.32.4", 2, url + "2", 2)
+    assert badges(client.get("/test-cases").text)["TC4"] == "PENDING"
+
+    login(client)
+    assert post(client, "/refresh").status_code == 303
+    log = client.get("/jobs/1").text
+    assert "found PR #1 requests (attempt 1) on GitHub" in log
+    assert "PR #1 requests: merged" in log and "PR #2 requests: open" in log
+    assert [(r.attempt, r.pr_number) for r in ActionStore(db).with_prs(REPO)] == [(1, 1), (2, 2)]
+    html = client.get("/test-cases").text
+    assert badges(html)["TC4"] == "PASS" and "PR #1 requests 2.19.0 -&gt; 2.32.4 (attempt 1) merged" in html
+    page = client.get("/").text
+    assert "Latest attempt: PR #2" in page and "Attempt history (1 earlier)" in page
+
+    assert post(client, "/refresh").status_code == 303              # second refresh: nothing new found
+    assert "found PR" not in client.get("/jobs/2").text
+
+
+def test_llm_key_rejected_shows_a_banner_until_a_call_succeeds(web):
+    client, gh, db, _ = web
+    cache = LLMCache(db)
+    banner = "LLM key invalid, risk/diagnosis degraded"
+    assert banner not in client.get("/").text
+    cache.log("k1", "risk requests", "ok")
+    cache.log("k2", "risk werkzeug", "unavailable", "HTTP 401")
+    cache.log("k3", "diag PR #2", "cached")                            # cache hits say nothing about the key
+    cache.log("k4", "diag PR #2", "unavailable", "time budget exceeded")
+    for url in ("/", "/test-cases"):
+        page = client.get(url).text
+        assert banner in page and "HTTP 401" in page and 'role="alert"' in page
+    cache.log("k5", "risk requests", "unavailable", "HTTP 403")
+    assert "HTTP 403" in client.get("/").text
+    cache.log("k6", "risk requests", "ok")                             # key works again
+    assert banner not in client.get("/").text

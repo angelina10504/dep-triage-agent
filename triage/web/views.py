@@ -200,7 +200,8 @@ def build_rows(db_path: str, repo: str) -> tuple[list[Row], dict | None]:
         if not row.advisory_ids:
             row.advisory_ids = a.advisories
     for row in rows.values():
-        row.attempts.sort(key=lambda t: (t.approved_at, t.attempt), reverse=True)
+        # PR numbers only grow, so they order attempts even when an old PR was recorded late
+        row.attempts.sort(key=lambda t: (t.number, t.attempt), reverse=True)
     return list(rows.values()), latest
 
 

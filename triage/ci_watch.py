@@ -116,6 +116,47 @@ def observe(record: ActionRecord, client: GitHubClient, store: ActionStore) -> P
     return st
 
 
+def discover(repo: str, client: GitHubClient, store: ActionStore, upgrades: list[dict] = (),
+             max_attempts: int = 20) -> list[ActionRecord]:
+    """Record upgrade PRs that exist on GitHub but not in the store (any state, any attempt).
+
+    E.g. a fresh deployed DB whose scan only recorded the open PR of attempt 2: the merged
+    PR of attempt 1 is found here by its branch name, so it is watched and shown again.
+    upgrades: extra {dependency_id, package, target_version, advisories} to look for
+    (e.g. the latest stored plan); recorded PRs are always included.
+    """
+    from .github_pr import branch_name
+
+    recorded = store.with_prs(repo)
+    targets: dict[tuple[str, str], dict] = {}
+    for r in recorded:
+        targets.setdefault((r.dependency_id, r.target_version),
+                           {"package": r.package, "advisories": r.advisories})
+    for u in upgrades:
+        targets.setdefault((u["dependency_id"], u["target_version"]),
+                           {"package": u.get("package"), "advisories": u.get("advisories") or []})
+    found = []
+    for (dep, target), info in targets.items():
+        name = dep.split(":", 1)[1].split("@", 1)[0]
+        highest = max([r.attempt for r in recorded
+                       if r.dependency_id == dep and r.target_version == target] or [0])
+        for n in range(1, max_attempts + 1):
+            rec = store.get(dep, target, n)
+            if rec and rec.pr_number:
+                continue
+            branch = branch_name(name, target, n)
+            pr = client.find_pr(repo, branch)
+            if pr is None:
+                if n > highest:
+                    break
+                continue
+            store.record_approval(dep, target, repo, branch, "(existing PR on GitHub)",
+                                  info["package"], info["advisories"] or None, n)
+            store.record_pr(dep, target, pr["number"], pr["html_url"], n)
+            found.append(store.get(dep, target, n))
+    return found
+
+
 def watch(repo: str, client: GitHubClient, store: ActionStore, wait: bool = False,
           timeout: float = 600, interval: float = 15,
           sleep: Callable[[float], None] = time.sleep,

@@ -210,6 +210,17 @@ class LLMCache:
                         (key, subject, status, detail, _now()))
         self.db.commit()
 
+    def auth_failure(self) -> dict | None:
+        """The last LLM call that says something about the key, if it was rejected (401/403).
+
+        A later successful call clears it; cached hits and other failures (timeouts, bad
+        output) say nothing about the key and are ignored.
+        """
+        row = self.db.execute(
+            "SELECT status, detail, at FROM llm_events WHERE status = 'ok' OR (status = 'unavailable'"
+            " AND detail IN ('HTTP 401', 'HTTP 403')) ORDER BY id DESC LIMIT 1").fetchone()
+        return {"detail": row["detail"], "at": row["at"]} if row and row["status"] != "ok" else None
+
     def events(self) -> list[tuple]:
         return [tuple(r.values()) for r in self.db.execute("SELECT subject, status, detail FROM llm_events ORDER BY id")]
 

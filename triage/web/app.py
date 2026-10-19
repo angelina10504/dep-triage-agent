@@ -130,10 +130,19 @@ def create_app(cfg: WebConfig | None = None) -> FastAPI:
     def flash(request: Request, msg: str) -> None:
         request.session["flash"] = msg
 
+    def llm_auth_failure() -> dict | None:
+        from ..llm import LLMCache
+        cache = LLMCache(cfg.db)
+        try:
+            return cache.auth_failure()
+        finally:
+            cache.db.close()
+
     def page(request: Request, name: str, **ctx) -> HTMLResponse:
         return tpl.TemplateResponse(request, name, {
             "user": user(request), "csrf": csrf(request), "repo": cfg.repo, "path": cfg.path,
             "can_login": bool(cfg.password), "busy": runner.busy, "awaiting": store.awaiting(),
+            "llm_auth": llm_auth_failure(),
             "flash": request.session.pop("flash", None), **ctx})
 
     def evidence_files() -> list[str]:

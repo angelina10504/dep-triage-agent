@@ -177,11 +177,11 @@ def resolve(p: Proposal, client: GitHubClient, store: ActionStore, max_attempts:
         if pr is None:
             return Resolution("new", q, f"attempt {n}: no PR yet for {q.branch}", previous)
         state = _pr_state(pr)
+        if not (rec and rec.pr_url):         # found on GitHub only (open, merged or closed): remember it
+            store.record_approval(p.dependency_id, p.target_version, p.repo, q.branch,
+                                  "(existing PR on GitHub)", p.package, p.advisories, n)
+            store.record_pr(p.dependency_id, p.target_version, pr["number"], pr["html_url"], n)
         if state == "open":
-            if not (rec and rec.pr_url):     # found on GitHub only: remember it
-                store.record_approval(p.dependency_id, p.target_version, p.repo, q.branch,
-                                      "(existing PR on GitHub)", p.package, p.advisories, n)
-                store.record_pr(p.dependency_id, p.target_version, pr["number"], pr["html_url"], n)
             return Resolution("reuse", q, f"PR #{pr['number']} is still open", pr)
         if base_line is None:
             text, _ = client.get_file(p.repo, p.path, p.base)

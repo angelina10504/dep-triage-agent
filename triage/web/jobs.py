@@ -8,7 +8,7 @@ from typing import Callable
 
 from langgraph.types import Command
 
-from ..ci_watch import watch
+from ..ci_watch import discover, watch
 from ..diagnose import diagnose_failure
 from ..graph import Runtime, build_graph, checkpointer, pending_interrupt, progress
 from ..llm import llm_budget
@@ -74,13 +74,31 @@ def resume_job(make_runtime: Callable[[], Runtime], checkpoints: str, store: Run
     return job
 
 
+def _planned_upgrades(store, repo: str) -> list[dict]:
+    """Upgrades in the latest stored run, so their PRs are found even if none is recorded yet."""
+    data = ((store.latest_run(repo) or {}).get("data")) or {}
+    out = []
+    for p in data.get("plans") or []:
+        if p.get("status") != "upgrade" or not p.get("target_version"):
+            continue
+        advs = [{"id": m["advisory_id"], "aliases": m.get("aliases", [])} for m in data.get("matches") or []
+                if m["dependency_id"] == p["dependency_id"] and m["decision"] == "vulnerable"]
+        out.append({"dependency_id": p["dependency_id"], "package": p["package"],
+                    "target_version": p["target_version"], "advisories": advs})
+    return out
+
+
 def refresh_job(make_runtime: Callable[[], Runtime], store: RunStore, repo: str) -> Callable[[Log], None]:
     def job(log: Log) -> None:
         rt = make_runtime()
+        client = rt.client()
+        for r in discover(repo, client, rt.store, _planned_upgrades(rt.store, repo)):
+            log(f"found PR #{r.pr_number} {r.package or r.dependency_id} (attempt {r.attempt}) on GitHub, now tracked")
         if not rt.store.with_prs(repo):
             log(f"no upgrade PRs recorded for {repo}")
             return
-        statuses, _ = watch(repo, rt.client(), rt.store, wait=False)
+        # every attempt is re-observed, not only the latest (an earlier one may have been merged)
+        statuses, _ = watch(repo, client, rt.store, wait=False)
         for st in statuses:
             log(f"PR #{st.pr_number} {st.record.package}: {st.pr_state}, CI {st.ci_status} -> {st.outcome}")
         failing = [st for st in statuses if st.pr_state == "open" and st.ci_status == "failing"]

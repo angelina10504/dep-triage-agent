@@ -41,6 +41,7 @@ button.primary, .button.primary { background: var(--accent); color: var(--bg); b
 button.danger { color: var(--red); border-color: var(--red); }
 button.link { border: 0; padding: 0; background: none; color: var(--blue); text-decoration: underline; }
 .flash { background: var(--blue-bg); color: var(--blue); padding: 8px 12px; border-radius: 6px; }
+.banner.warn { background: var(--amber-bg); color: var(--amber); border: 1px solid var(--amber); padding: 10px 12px; border-radius: 6px; }
 
 .table-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
 table.triage { width: 100%; border-collapse: collapse; }

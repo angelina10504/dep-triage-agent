@@ -33,6 +33,9 @@
   </div>
 </header>
 <main>
+  {% if llm_auth %}<p class="banner warn" role="alert"><b>LLM key invalid, risk/diagnosis degraded.</b>
+    The LLM provider rejected the API key ({{ llm_auth.detail }}, last seen {{ llm_auth.at }}). Version matching, PRs and CI status are unaffected;
+    risk explanations and CI failure diagnoses fall back to code-only results until the key is fixed.</p>{% endif %}
   {% if flash %}<p class="flash">{{ flash }}</p>{% endif %}
   {% block content %}{% endblock %}
 </main>
